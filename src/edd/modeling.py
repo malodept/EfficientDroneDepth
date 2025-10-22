@@ -15,7 +15,7 @@ class DPTSmall(nn.Module):
         self.lateral4 = nn.Conv2d(chs[3], 256, 1)
         self.lateral3 = nn.Conv2d(chs[2], 256, 1)
         self.lateral2 = nn.Conv2d(chs[1], 256, 1)
-        self.lateral1 = nn.Conv2d(chs[0], 256, 1)
+        self.lateral1 = nn.Conv2d(chs[0], 128, 1)
         self.smooth3 = nn.Conv2d(256, 256, 3, padding=1)
         self.smooth2 = nn.Conv2d(256, 128, 3, padding=1)
         self.smooth1 = nn.Conv2d(128, 64, 3, padding=1)
