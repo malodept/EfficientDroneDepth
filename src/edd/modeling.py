@@ -22,13 +22,26 @@ class DPTSmall(nn.Module):
         self.head = nn.Sequential(nn.Conv2d(64, 64, 3, padding=1), nn.ReLU(inplace=True), nn.Conv2d(64, 1, 1))
 
     def forward(self, x):
+        # encoder
         c1, c2, c3, c4 = self.backbone(x)
+
+        # FPN
         p4 = self.lateral4(c4)
-        p3 = F.interpolate(p4, scale_factor=2, mode="bilinear", align_corners=False) + self.lateral3(c3); p3 = self.smooth3(p3)
-        p2 = F.interpolate(p3, scale_factor=2, mode="bilinear", align_corners=False) + self.lateral2(c2); p2 = self.smooth2(p2)
-        p1 = F.interpolate(p2, scale_factor=2, mode="bilinear", align_corners=False) + self.lateral1(c1); p1 = self.smooth1(p1)
+        p3 = F.interpolate(p4, scale_factor=2, mode="bilinear", align_corners=False) + self.lateral3(c3)
+        p3 = self.smooth3(p3)
+
+        p2 = F.interpolate(p3, scale_factor=2, mode="bilinear", align_corners=False) + self.lateral2(c2)
+        p2 = self.smooth2(p2)
+
+        p1 = F.interpolate(p2, scale_factor=2, mode="bilinear", align_corners=False) + self.lateral1(c1)  # lateral1 has 128 out-ch
+        p1 = self.smooth1(p1)
+
+        # head
         out = self.head(F.interpolate(p1, scale_factor=2, mode="bilinear", align_corners=False))
+        H, W = x.shape[-2:]  # force exact input size
+        out = F.interpolate(out, size=(H, W), mode="bilinear", align_corners=False)
         return F.relu(out)
+
 
 def silog_loss(pred, target, mask, lam=0.85):
     eps = 1e-6
