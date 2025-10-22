@@ -1,0 +1,10 @@
+torch>=2.2.0
+torchvision>=0.17.0
+timm>=0.9.16
+numpy
+opencv-python
+scikit-image
+onnx>=1.14.0
+onnxruntime>=1.17.0
+rich
+matplotlib
