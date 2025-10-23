@@ -1,4 +1,4 @@
-# EfficientDroneDepth — Lightweight Monocular Depth for Aerial Vision
+# EfficientDroneDepth : Lightweight Monocular Depth for Aerial Vision
 
 Goal: train and optimize a lightweight monocular depth model for aerial imagery (TartanAir / VisDrone), focusing on accuracy–latency trade-offs for embedded deployment.
 

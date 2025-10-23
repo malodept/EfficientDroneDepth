@@ -42,17 +42,27 @@ class DPTSmall(nn.Module):
         out = F.interpolate(out, size=(H, W), mode="bilinear", align_corners=False)
         return F.relu(out)
 
+def _align(pred, target, mask, eps=1e-6):
+    # pred: (B,1,H,W) ; target/mask: (B,1,H,W) ou (B,H,W)
+    if pred.dim()==4 and pred.size(1)==1:   pred   = pred[:,0]
+    if target.dim()==4 and target.size(1)==1: target = target[:,0]
+    if mask.dim()==4 and mask.size(1)==1:     mask   = mask[:,0]
+    if pred.shape[-2:] != target.shape[-2:]:
+        target = F.interpolate(target.unsqueeze(1), size=pred.shape[-2:], mode="nearest")[:,0]
+        mask   = F.interpolate(mask.unsqueeze(1),   size=pred.shape[-2:], mode="nearest")[:,0]
+    pred   = pred.clamp_min(eps)
+    target = target.clamp_min(eps)
+    return pred, target, mask
 
-def silog_loss(pred, target, mask, lam=0.85):
-    eps = 1e-6
-    pred = torch.clamp(pred, min=eps)
-    target = torch.clamp(target, min=eps)
+def silog_loss(pred, target, mask, eps=1e-6):
+    pred, target, mask = _align(pred, target, mask, eps)
     d = (pred.log() - target.log()) * mask
-    n = mask.sum() + eps
-    return (d.pow(2).sum()/n) - lam * (d.sum().pow(2) / (n*n))
+    valid = mask.sum() + eps
+    return ((d**2).sum() - (d.sum()**2)/valid) / valid
 
-def l1_masked(pred, target, mask):
-    return (torch.abs(pred - target) * mask).sum() / (mask.sum() + 1e-6)
+def l1_masked(pred, target, mask, eps=1e-6):
+    pred, target, mask = _align(pred, target, mask, eps)
+    return (mask * (pred - target).abs()).sum() / (mask.sum() + eps)
 
 @torch.no_grad()
 def depth_metrics(pred, target, mask):
