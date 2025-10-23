@@ -42,14 +42,25 @@ class DPTSmall(nn.Module):
         out = F.interpolate(out, size=(H, W), mode="bilinear", align_corners=False)
         return F.relu(out)
 
+def _to_chw(x):
+    # (B,H,W,C) -> (B,C,H,W)
+    if x.dim() == 4 and x.size(1) not in (1,3,4) and x.size(-1) in (1,3,4):
+        x = x.permute(0, 3, 1, 2)
+    return x
+
 def _align(pred, target, mask, eps=1e-6):
-    # pred: (B,1,H,W) ; target/mask: (B,1,H,W) ou (B,H,W)
+    pred   = _to_chw(pred)
+    target = _to_chw(target)
+    mask   = _to_chw(mask)
+
     if pred.dim()==4 and pred.size(1)==1:   pred   = pred[:,0]
     if target.dim()==4 and target.size(1)==1: target = target[:,0]
     if mask.dim()==4 and mask.size(1)==1:     mask   = mask[:,0]
+
     if pred.shape[-2:] != target.shape[-2:]:
         target = F.interpolate(target.unsqueeze(1), size=pred.shape[-2:], mode="nearest")[:,0]
         mask   = F.interpolate(mask.unsqueeze(1),   size=pred.shape[-2:], mode="nearest")[:,0]
+
     pred   = pred.clamp_min(eps)
     target = target.clamp_min(eps)
     return pred, target, mask

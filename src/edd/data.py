@@ -22,22 +22,21 @@ def _read_image(path: str, size: int = 384):
     img = np.transpose(img, (2, 0, 1))
     return img
 
-def _read_depth(path: str, size: int = 384):
-    depth = cv2.imread(path, cv2.IMREAD_UNCHANGED)
-    if depth is None:
+def _read_depth(path, img_size):
+    d = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)  # conserve 16UC1
+    if d is None:
         raise FileNotFoundError(path)
-    if depth.dtype == np.uint16:
-        depth = depth.astype(np.float32) / 1000.0
-    else:
-        depth = depth.astype(np.float32)
-    h, w = depth.shape[:2]
-    scale = size / max(h, w)
-    depth = cv2.resize(depth, (int(w*scale), int(h*scale)), interpolation=cv2.INTER_NEAREST)
-    pad_h = size - depth.shape[0]
-    pad_w = size - depth.shape[1]
-    depth = cv2.copyMakeBorder(depth, 0, pad_h, 0, pad_w, cv2.BORDER_CONSTANT, value=0)
-    mask = (depth > 0) & np.isfinite(depth)
-    return depth, mask.astype(np.float32)
+    if d.ndim == 3:                    # si RGBA/BGR par erreur -> prend 1 canal
+        d = d[..., 0]
+    d = cv2.resize(d, (img_size, img_size), interpolation=cv2.INTER_NEAREST)
+    d = d.astype(np.float32)
+
+    # TartanAir est en mm -> m
+    if d.max() > 100:                  # heuristique robuste
+        d = d / 1000.0
+
+    m = (d > 0).astype(np.float32)
+    return d, m
 
 class TartanAirDepth(Dataset):
     """
@@ -67,11 +66,13 @@ class TartanAirDepth(Dataset):
     def __getitem__(self, idx):
         img_path, depth_path = self.pairs[idx]
         img = _read_image(img_path, self.img_size)
-        depth, mask = _read_depth(depth_path, self.img_size)
+        depth_np, mask_np = _read_depth(depth_path, self.img_size)
+        depth = torch.from_numpy(depth_np).unsqueeze(0)  # (1,H,W)
+        mask  = torch.from_numpy(mask_np ).unsqueeze(0)  # (1,H,W)
         return {
             "image": torch.from_numpy(img).float(),
-            "depth": torch.from_numpy(depth).unsqueeze(0).float(),
-            "mask": torch.from_numpy(mask).unsqueeze(0).float(),
+            "depth": depth.float(),
+            "mask": mask.float(),
             "img_path": img_path,
             "depth_path": depth_path,
         }
