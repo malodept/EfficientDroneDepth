@@ -53,7 +53,7 @@ def validate(model, loader, device):
 def main():
     args = parse_args(); os.makedirs("runs", exist_ok=True)
     device = "cuda" if torch.cuda.is_available() else "cpu"; print(f"[device] {device}")
-    train_loader, val_loader = make_loaders(args.data_root, img_size=args.img_size, batch_size=args.batch_size, limit_samples=args.limit_samples, num__workers=args.num_workers)
+    train_loader, val_loader = make_loaders(args.data_root, img_size=args.img_size, batch_size=args.batch_size, limit_samples=args.limit_samples)
     model = DPTSmall(backbone_name=args.backbone, pretrained=True).to(device)
     optim = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     sched = CosineAnnealingLR(optim, T_max=args.epochs)
