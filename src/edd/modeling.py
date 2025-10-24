@@ -40,7 +40,7 @@ class DPTSmall(nn.Module):
         out = self.head(F.interpolate(p1, scale_factor=2, mode="bilinear", align_corners=False))
         H, W = x.shape[-2:]  # force exact input size
         out = F.interpolate(out, size=(H, W), mode="bilinear", align_corners=False)
-        return F.relu(out)
+        return F.softplus(out)
 
 def _to_chw(x):
     # (B,H,W,C) -> (B,C,H,W)
@@ -61,25 +61,27 @@ def _align(pred, target, mask, eps=1e-6):
         target = F.interpolate(target.unsqueeze(1), size=pred.shape[-2:], mode="nearest")[:,0]
         mask   = F.interpolate(mask.unsqueeze(1),   size=pred.shape[-2:], mode="nearest")[:,0]
 
-    pred   = pred.clamp_min(eps)
     target = target.clamp_min(eps)
     return pred, target, mask
 
 def silog_loss(pred, target, mask, eps=1e-6):
     pred, target, mask = _align(pred, target, mask, eps)
-    d = (pred.log() - target.log()) * mask
+    p = F.softplus(pred) + eps
+    d = (p.log() - target.log()) * mask
     valid = mask.sum() + eps
     return ((d**2).sum() - (d.sum()**2)/valid) / valid
 
 def l1_masked(pred, target, mask, eps=1e-6):
     pred, target, mask = _align(pred, target, mask, eps)
-    return (mask * (pred - target).abs()).sum() / (mask.sum() + eps)
+    p = F.softplus(pred)
+    return (mask * (p - target).abs()).sum() / (mask.sum() + eps)
 
 @torch.no_grad()
 def depth_metrics(pred, target, mask):
     eps = 1e-6
     m = mask.bool()
-    p = pred[m].clamp(min=eps); t = target[m].clamp(min=eps)
+    p = pred[m].relu() + eps
+    t = target[m].clamp(min=eps)
     abs_rel = (torch.abs(p - t) / t).mean().item()
     rmse = torch.sqrt(((p - t).pow(2)).mean()).item()
     ratio = torch.max(p/t, t/p)

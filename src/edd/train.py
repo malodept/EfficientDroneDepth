@@ -14,7 +14,7 @@ def parse_args():
     ap.add_argument("--img_size", type=int, default=384)
     ap.add_argument("--batch_size", type=int, default=8)
     ap.add_argument("--epochs", type=int, default=10)
-    ap.add_argument("--lr", type=float, default=2e-4)
+    ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--weight_decay", type=float, default=1e-4)
     ap.add_argument("--limit_samples", type=int, default=None)
     ap.add_argument("--backbone", type=str, default="resnet34")
@@ -29,6 +29,9 @@ def train_one_epoch(model, loader, optimizer, device):
         depth = batch["depth"].to(device, non_blocking=True)
         mask = batch["mask"].to(device, non_blocking=True)
         pred = model(img)
+        valid = mask.sum() / mask.numel()
+        if valid < 0.05:
+            print(f"[warn] low valid ratio: {float(valid):.3f}")
         loss = 0.7 * silog_loss(pred, depth, mask) + 0.3 * l1_masked(pred, depth, mask)
         optimizer.zero_grad(set_to_none=True); loss.backward()
         nn.utils.clip_grad_norm_(model.parameters(), 1.0)
