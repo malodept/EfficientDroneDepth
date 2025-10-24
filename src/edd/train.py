@@ -24,14 +24,24 @@ def parse_args():
 
 def train_one_epoch(model, loader, optimizer, device):
     model.train(); total = 0.0
-    for batch in loader:
-        img = batch["image"].to(device, non_blocking=True)
+    for i, batch in enumerate(loader):
+        img   = batch["image"].to(device, non_blocking=True)
         depth = batch["depth"].to(device, non_blocking=True)
-        mask = batch["mask"].to(device, non_blocking=True)
-        pred = model(img)
+        mask  = batch["mask"].to(device, non_blocking=True)
+
+        pred = model(img)  # logits = log(depth) après tes patches
+
+        if i == 0:  # debug 1x/epoch
+            with torch.no_grad():
+                ps = pred[:1]
+                print("[dbg] logD mean:", float(ps.mean()),
+                      "target mean:", float(depth[:1].mean()),
+                      "mask%:", float(mask.mean()))
+
         valid = mask.sum() / mask.numel()
         if valid < 0.05:
             print(f"[warn] low valid ratio: {float(valid):.3f}")
+
         loss = 0.7 * silog_loss(pred, depth, mask) + 0.3 * l1_masked(pred, depth, mask)
         optimizer.zero_grad(set_to_none=True); loss.backward()
         nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -39,7 +49,7 @@ def train_one_epoch(model, loader, optimizer, device):
         total += loss.item()
     return total / max(1, len(loader))
 
-@torch.no_grad()
+
 def validate(model, loader, device):
     model.eval(); total = 0.0
     m = {"AbsRel":0.0,"RMSE":0.0,"Delta<1.25":0.0}; n=0

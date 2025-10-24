@@ -40,7 +40,7 @@ class DPTSmall(nn.Module):
         out = self.head(F.interpolate(p1, scale_factor=2, mode="bilinear", align_corners=False))
         H, W = x.shape[-2:]  # force exact input size
         out = F.interpolate(out, size=(H, W), mode="bilinear", align_corners=False)
-        return F.softplus(out)
+        return out
 
 def _to_chw(x):
     # (B,H,W,C) -> (B,C,H,W)
@@ -66,24 +66,26 @@ def _align(pred, target, mask, eps=1e-6):
 
 def silog_loss(pred, target, mask, eps=1e-6):
     pred, target, mask = _align(pred, target, mask, eps)
-    p = F.softplus(pred) + eps
-    d = (p.log() - target.log()) * mask
+    # pred est log(depth) ; target_log = log(target)
+    d = ((pred - target.log()) * mask)
     valid = mask.sum() + eps
     return ((d**2).sum() - (d.sum()**2)/valid) / valid
 
 def l1_masked(pred, target, mask, eps=1e-6):
     pred, target, mask = _align(pred, target, mask, eps)
-    p = F.softplus(pred)
-    return (mask * (p - target).abs()).sum() / (mask.sum() + eps)
+    # L1 sur log-profondeur pour la stabilité
+    return (mask * (pred - target.log()).abs()).sum() / (mask.sum() + eps)
+
 
 @torch.no_grad()
 def depth_metrics(pred, target, mask):
     eps = 1e-6
     m = mask.bool()
-    p = pred[m].relu() + eps
+    p = pred[m].exp().clamp(min=eps)        # repasse en mètres
     t = target[m].clamp(min=eps)
     abs_rel = (torch.abs(p - t) / t).mean().item()
     rmse = torch.sqrt(((p - t).pow(2)).mean()).item()
     ratio = torch.max(p/t, t/p)
     delta = (ratio < 1.25).float().mean().item()
     return {"AbsRel": abs_rel, "RMSE": rmse, "Delta<1.25": delta}
+
