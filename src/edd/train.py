@@ -30,19 +30,38 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None):
         depth = batch["depth"].to(device, non_blocking=True)
         mask  = batch["mask"].to(device, non_blocking=True)
 
-        pred = model(img)
+        pred = model(img)  # logits = log(depth)
 
         if i == 0:
             with torch.no_grad():
+                # logs rapides
                 ps = pred[:1]
                 print("[dbg] logD mean:", float(ps.mean()),
                       "target mean:", float(depth[:1].mean()),
                       "mask%:", float(mask.mean()))
+                # dump visus alignement
+                try:
+                    import numpy as np, imageio.v2 as imageio
+                    x = img[0].detach().cpu().numpy().transpose(1,2,0)
+                    x = (x * np.array([0.229,0.224,0.225]) + np.array([0.485,0.456,0.406]))
+                    x = np.clip(x*255, 0, 255).astype(np.uint8)
+                    y = depth[0,0].detach().cpu().numpy()
+                    p = pred[0,0].detach().cpu().numpy()
+                    p_lin = np.exp(p)
+                    y_viz = (np.clip(y/np.percentile(y,99), 0, 1)*255).astype(np.uint8)
+                    p_viz = (np.clip(p_lin/np.percentile(p_lin,99), 0, 1)*255).astype(np.uint8)
+                    imageio.imwrite("runs/figures/rgb.png",  x)
+                    imageio.imwrite("runs/figures/gt.png",   y_viz)
+                    imageio.imwrite("runs/figures/pred.png", p_viz)
+                    print("[dump] runs/figures/{rgb,gt,pred}.png")
+                except Exception as e:
+                    print("[dump skipped]", repr(e))
 
         valid = mask.sum() / mask.numel()
         if valid < 0.05:
             print(f"[warn] low valid ratio: {float(valid):.3f}")
 
+        # perte (log-space): ajuste si besoin
         loss = 0.9 * silog_loss(pred, depth, mask) + 0.1 * l1_masked(pred, depth, mask)
 
         optimizer.zero_grad(set_to_none=True)
@@ -54,6 +73,7 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None):
 
         total += loss.item()
     return total / max(1, len(loader))
+
 
 
 
