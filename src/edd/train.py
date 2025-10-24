@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.lr_scheduler import OneCycleLR
 from rich import print
 from .data import make_loaders
 from .modeling import DPTSmall, silog_loss, l1_masked, depth_metrics
@@ -22,16 +23,16 @@ def parse_args():
     ap.add_argument("--num_workers", type=int, default=0)
     return ap.parse_args()
 
-def train_one_epoch(model, loader, optimizer, device):
+def train_one_epoch(model, loader, optimizer, device, scheduler=None):
     model.train(); total = 0.0
     for i, batch in enumerate(loader):
         img   = batch["image"].to(device, non_blocking=True)
         depth = batch["depth"].to(device, non_blocking=True)
         mask  = batch["mask"].to(device, non_blocking=True)
 
-        pred = model(img)  # logits = log(depth) après tes patches
+        pred = model(img)
 
-        if i == 0:  # debug 1x/epoch
+        if i == 0:
             with torch.no_grad():
                 ps = pred[:1]
                 print("[dbg] logD mean:", float(ps.mean()),
@@ -42,12 +43,18 @@ def train_one_epoch(model, loader, optimizer, device):
         if valid < 0.05:
             print(f"[warn] low valid ratio: {float(valid):.3f}")
 
-        loss = 0.7 * silog_loss(pred, depth, mask) + 0.3 * l1_masked(pred, depth, mask)
-        optimizer.zero_grad(set_to_none=True); loss.backward()
-        nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        loss = 0.9 * silog_loss(pred, depth, mask) + 0.1 * l1_masked(pred, depth, mask)
+
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
+        if scheduler is not None:
+            scheduler.step()
+
         total += loss.item()
     return total / max(1, len(loader))
+
 
 
 def validate(model, loader, device):
@@ -66,19 +73,31 @@ def validate(model, loader, device):
 def main():
     args = parse_args(); os.makedirs("runs", exist_ok=True)
     device = "cuda" if torch.cuda.is_available() else "cpu"; print(f"[device] {device}")
-    train_loader, val_loader = make_loaders(args.data_root, img_size=args.img_size, batch_size=args.batch_size, limit_samples=args.limit_samples)
+
+    train_loader, val_loader = make_loaders(
+        args.data_root, img_size=args.img_size, batch_size=args.batch_size, limit_samples=args.limit_samples
+    )
+
     model = DPTSmall(backbone_name=args.backbone, pretrained=True).to(device)
-    optim = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    sched = CosineAnnealingLR(optim, T_max=args.epochs)
+
+    optim = AdamW(model.parameters(), lr=3e-3, weight_decay=1e-2)
+    sched = OneCycleLR(optim, max_lr=3e-3, steps_per_epoch=len(train_loader),
+                       epochs=args.epochs, pct_start=0.1)
+
     best = 9e9
     print("batches:", len(train_loader), len(val_loader))
-    for epoch in range(1, args.epochs+1):
-        t0=time.time(); tr = train_one_epoch(model, train_loader, optim, device)
-        va, met = validate(model, val_loader, device); sched.step()
+
+    for epoch in range(1, args.epochs + 1):
+        t0 = time.time()
+        tr = train_one_epoch(model, train_loader, optim, device, scheduler=sched)  # ← step dans train_one_epoch
+        va, met = validate(model, val_loader, device)
         print(f"[epoch {epoch}] train={tr:.4f} val={va:.4f} AbsRel={met['AbsRel']:.4f} RMSE={met['RMSE']:.4f} d1.25={met['Delta<1.25']:.4f} time={time.time()-t0:.1f}s")
         if va < best:
-            best = va; torch.save({"model": model.state_dict(), "args": vars(args)}, args.ckpt); print(f"[ckpt] saved -> {args.ckpt}")
+            best = va
+            torch.save({"model": model.state_dict(), "args": vars(args)}, args.ckpt)
+            print(f"[ckpt] saved -> {args.ckpt}")
     print("[done]")
+
 
 if __name__ == "__main__":
     main()
