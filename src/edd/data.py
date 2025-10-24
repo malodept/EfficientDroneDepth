@@ -23,7 +23,7 @@ def _read_image(path: str, size: int = 384):
     return img
 
 def _read_depth(path, img_size):
-    d = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)  # conserve 16UC1
+    d = cv2.imread(str(path), cv2.IMREAD_ANYDEPTH)  
     if d is None:
         raise FileNotFoundError(path)
     if d.ndim == 3:                    # si RGBA/BGR par erreur -> prend 1 canal
@@ -34,8 +34,10 @@ def _read_depth(path, img_size):
     # TartanAir est en mm -> m
     if d.max() > 100:                  # heuristique robuste
         d = d / 1000.0
+    
+    d = np.clip(d, 0.0, 80.0)
 
-    m = (d > 0).astype(np.float32)
+    m = (d > 1e-6).astype(np.float32)
     return d, m
 
 class TartanAirDepth(Dataset):

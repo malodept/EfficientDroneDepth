@@ -19,6 +19,7 @@ def parse_args():
     ap.add_argument("--limit_samples", type=int, default=None)
     ap.add_argument("--backbone", type=str, default="resnet34")
     ap.add_argument("--ckpt", type=str, default="runs/edd_midas.pt")
+    ap.add_argument("--num_workers", type=int, default=0)
     return ap.parse_args()
 
 def train_one_epoch(model, loader, optimizer, device):
