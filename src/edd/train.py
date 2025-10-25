@@ -7,7 +7,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.optim.lr_scheduler import OneCycleLR
 from rich import print
 from .data import make_loaders
-from .modeling import DPTSmall, silog_loss, l1_masked, depth_metrics
+from .modeling import DPTSmall, silog_loss, l1_masked, depth_metrics, _align
 
 def parse_args():
     ap = argparse.ArgumentParser()
