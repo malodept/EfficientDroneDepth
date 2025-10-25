@@ -103,6 +103,9 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None):
         valid_ratio = valid_pix / mask.numel()
         if valid_ratio < 0.05:
             print(f"[warn] low valid ratio: {float(valid_ratio):.3f}")
+        
+        pred = torch.clamp(pred, -5.0, 5.0)
+
 
         # pertes stables en log-espace (pas d'exp ici)
         loss = 0.6 * silog_loss(pred, depth, mask) \
@@ -174,12 +177,9 @@ def main():
     for n,p in model.named_parameters():
         (backbone_params if "backbone" in n else head_params).append(p)
 
-    optim = AdamW(
-        [{"params": backbone_params, "lr": 2e-4},
-         {"params": head_params,     "lr": 1e-3}],
-        weight_decay=5e-3
-    )
-    sched = CosineAnnealingLR(optim, T_max=args.epochs, eta_min=2e-4)
+    optim = AdamW(model.parameters(), lr=5e-4, weight_decay=5e-3)
+    sched  = CosineAnnealingLR(optim, T_max=args.epochs, eta_min=1e-5)
+
 
     best = 9e9
     print("batches:", len(train_loader), len(val_loader))

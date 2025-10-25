@@ -64,13 +64,16 @@ def _align(pred, target, mask, eps=1e-6):
     target = target.clamp_min(eps)
     return pred, target, mask
 
-def silog_loss(pred, target, mask, eps=1e-6):
-    pred, target, mask = _align(pred, target, mask, eps)
-    valid = mask.sum()
-    if valid < 1:  # aucun pixel valide
-        return pred.new_tensor(0.0)
-    d = (pred - target.log()) * mask
-    return ((d**2).sum() - (d.sum()**2)/ (valid + eps)) / (valid + eps)
+def silog_loss(pred_log, target, mask):
+    log_d = pred_log
+    log_gt = torch.log(torch.clamp(target, min=1e-3))
+    diff = (log_d - log_gt)[mask > 0]
+    if diff.numel() == 0:
+        return torch.tensor(0., device=pred_log.device)
+    var = diff.var()
+    mean = diff.mean()
+    return torch.sqrt(var + 0.15 * mean**2)
+
 
 
 def l1_masked(pred, target, mask, eps=1e-6):

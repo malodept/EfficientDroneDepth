@@ -37,7 +37,7 @@ def _read_depth(path, size):
     if mx > 5000:   d /= 1000.0   # mm→m
     elif mx <= 255: d /= 100.0    # cm→m
 
-    d = np.clip(d, 0.0, 80.0)
+    d = np.clip(d, 0.01, 80.0)
     m = ((d > 1e-6) & np.isfinite(d)).astype(np.float32)
     return d, m
 
