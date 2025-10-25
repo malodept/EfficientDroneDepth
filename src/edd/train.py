@@ -80,8 +80,7 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None):
         if valid < 0.05:
             print(f"[warn] low valid ratio: {float(valid):.3f}")
 
-        # perte en log-espace (amplifiée pour gradient plus net)
-        loss = 10.0 * silog_loss(pred, depth, mask)
+        loss = silog_loss(pred, depth, mask)
 
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
@@ -128,13 +127,16 @@ def main():
 
     model = DPTSmall(backbone_name=args.backbone, pretrained=True).to(device)
 
-    if True:
+    if False:
         overfit_one_batch(model, train_loader, device, steps=200, lr=1e-2)
         return
 
-    optim = AdamW(model.parameters(), lr=3e-3, weight_decay=1e-2)
-    sched = OneCycleLR(optim, max_lr=3e-3, steps_per_epoch=len(train_loader),
-                       epochs=args.epochs, pct_start=0.1)
+    
+    
+    optim = AdamW(model.parameters(), lr=1e-3, weight_decay=1e-2)
+    sched  = OneCycleLR(optim, max_lr=1e-3, steps_per_epoch=len(train_loader),
+                        epochs=args.epochs, pct_start=0.1)
+
 
     best = 9e9
     print("batches:", len(train_loader), len(val_loader))
