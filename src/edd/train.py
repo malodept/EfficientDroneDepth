@@ -35,6 +35,20 @@ def overfit_one_batch(model, loader, device, steps=200, lr=1e-2):
         if (t+1)%20==0:
             print(f"[overfit] step {t+1} loss={loss.item():.4f}")
 
+def _grad_xy(x):
+    return x[..., 1:, :] - x[..., :-1, :], x[..., :, 1:] - x[..., :, :-1]
+
+def grad_loss_log(pred, target, mask, eps=1e-6):
+    # log-espace déjà : pred ~ log(D), target_log = log(target)
+    p, t, m = _align(pred, target, mask, eps)  
+    gx_p, gy_p = _grad_xy(p)
+    gx_t, gy_t = _grad_xy(t.log())
+    gx_m, gy_m = _grad_xy(m)
+    l = (gx_m * (gx_p - gx_t).abs()).sum() + (gy_m * (gy_p - gy_t).abs()).sum()
+    v = gx_m.sum() + gy_m.sum() + eps
+    return l / v
+
+
 def train_one_epoch(model, loader, optimizer, device, scheduler=None):
     model.train(); total = 0.0
     ref_name, ref_w = None, None
@@ -91,7 +105,9 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None):
             print(f"[warn] low valid ratio: {float(valid_ratio):.3f}")
 
         # pertes stables en log-espace (pas d'exp ici)
-        loss = 0.7 * silog_loss(pred, depth, mask) + 0.3 * l1_masked(pred, depth, mask)
+        loss = 0.6 * silog_loss(pred, depth, mask) \
+             + 0.2 * l1_masked(pred, depth, mask) \
+             + 0.2 * grad_loss_log(pred, depth, mask)
 
         if not torch.isfinite(loss):
             print("[skip] non-finite loss"); 
@@ -154,8 +170,16 @@ def main():
         overfit_one_batch(model, train_loader, device, steps=200, lr=1e-2)
         return
 
-    optim = AdamW(model.parameters(), lr=8e-4, weight_decay=5e-3)
-    sched = CosineAnnealingLR(optim, T_max=args.epochs, eta_min=4e-4)
+    backbone_params, head_params = [], []
+    for n,p in model.named_parameters():
+        (backbone_params if "backbone" in n else head_params).append(p)
+
+    optim = AdamW(
+        [{"params": backbone_params, "lr": 2e-4},
+         {"params": head_params,     "lr": 1e-3}],
+        weight_decay=5e-3
+    )
+    sched = CosineAnnealingLR(optim, T_max=args.epochs, eta_min=2e-4)
 
     best = 9e9
     print("batches:", len(train_loader), len(val_loader))
@@ -163,10 +187,15 @@ def main():
     for epoch in range(1, args.epochs + 1):
         t0 = time.time()
         tr = train_one_epoch(model, train_loader, optim, device, scheduler=sched)
+        if epoch <= 3:
+            for g in optim.param_groups:
+                if g["lr"] > 2e-4:
+                    g["lr"] = 5e-4
         va, met = validate(model, val_loader, device)
-        print(f"[epoch {epoch}] lr={sched.get_last_lr()[0]:.2e} "
-              f"train={tr:.4f} val={va:.4f} AbsRel={met['AbsRel']:.4f} "
-              f"RMSE={met['RMSE']:.4f} d1.25={met['Delta<1.25']:.4f} time={time.time()-t0:.1f}s")
+        lrs = [f"{g['lr']:.2e}" for g in optim.param_groups]
+        print(f"[epoch {epoch}] lrs={lrs} train={tr:.4f} val={va:.4f} "
+              f"AbsRel={met['AbsRel']:.4f} RMSE={met['RMSE']:.4f} d1.25={met['Delta<1.25']:.4f} "
+              f"time={time.time()-t0:.1f}s")
         if va < best:
             best = va
             torch.save({"model": model.state_dict(), "args": vars(args)}, args.ckpt)

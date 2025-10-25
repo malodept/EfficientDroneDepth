@@ -50,6 +50,7 @@ class TartanAirDepth(Dataset):
     """
     def __init__(self, root: str, img_size: int = 384, limit_samples: Optional[int] = None, split_ratio: float = 0.9, train: bool = True):
         self.img_size = img_size
+        self.train = train
         left_paths = glob.glob(os.path.join(root, "**", "left", "*_left.*"), recursive=True)
         pairs = []
         for lp in left_paths:
@@ -71,17 +72,25 @@ class TartanAirDepth(Dataset):
 
     def __getitem__(self, idx):
         img_path, depth_path = self.pairs[idx]
-        img = _read_image(img_path, self.img_size)
-        depth_np, mask_np = _read_depth(depth_path, self.img_size)
+        img = _read_image(img_path, self.img_size)                # (C,H,W) float32[0..1] normée
+        depth_np, mask_np = _read_depth(depth_path, self.img_size) # (H,W) mètres
+
+        # flip horizontal synchrone (train uniquement)
+        if getattr(self, "train", False) and np.random.rand() < 0.5:
+            img      = np.flip(img, axis=2).copy()   # W
+            depth_np = np.flip(depth_np, axis=1).copy()
+            mask_np  = np.flip(mask_np,  axis=1).copy()
+
         depth = torch.from_numpy(depth_np).unsqueeze(0)  # (1,H,W)
         mask  = torch.from_numpy(mask_np ).unsqueeze(0)  # (1,H,W)
         return {
             "image": torch.from_numpy(img).float(),
             "depth": depth.float(),
-            "mask": mask.float(),
+            "mask":  mask.float(),
             "img_path": img_path,
             "depth_path": depth_path,
         }
+
 
 def make_loaders(root: str, img_size: int = 384, batch_size: int = 8, num_workers: int = 2, limit_samples: Optional[int] = None):
     train_ds = TartanAirDepth(root, img_size=img_size, limit_samples=limit_samples, train=True)
