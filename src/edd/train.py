@@ -52,6 +52,10 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None):
                 print("[dbg] logD mean:", float(ps.mean()),
                       "target mean:", float(depth[:1].mean()),
                       "mask%:", float(mask.mean()))
+                # stats logits
+                print("[dbg] pred min/median/max:",
+                      float(pred.min()), float(pred.median()), float(pred.max()))
+                # dump visus sécurisé
                 try:
                     import numpy as np, imageio.v2 as imageio
                     x = img[0].detach().cpu().numpy().transpose(1,2,0)
@@ -59,9 +63,11 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None):
                     x = np.clip(x*255, 0, 255).astype(np.uint8)
                     y = depth[0,0].detach().cpu().numpy()
                     p = pred[0,0].detach().cpu().numpy()
-                    p_lin = np.exp(p)
-                    y_viz = (np.clip(y/ max(1e-6, np.percentile(y, 99)), 0, 1)*255).astype(np.uint8)
-                    p_viz = (np.clip(p_lin/ max(1e-6, np.percentile(p_lin, 99)), 0, 1)*255).astype(np.uint8)
+                    p_lin = np.exp(np.clip(p, -10, 10))  # clamp anti-overflow
+                    den_y = float(max(1e-6, np.percentile(y,     99)))
+                    den_p = float(max(1e-6, np.percentile(p_lin, 99)))
+                    y_viz = (np.clip(y/den_y,     0, 1)*255).astype(np.uint8)
+                    p_viz = (np.clip(p_lin/den_p, 0, 1)*255).astype(np.uint8)
                     imageio.imwrite("runs/figures/rgb.png",  x)
                     imageio.imwrite("runs/figures/gt.png",   y_viz)
                     imageio.imwrite("runs/figures/pred.png", p_viz)
@@ -84,10 +90,8 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None):
         if valid_ratio < 0.05:
             print(f"[warn] low valid ratio: {float(valid_ratio):.3f}")
 
-        # perte stable
-        p_lin = torch.exp(pred)
-        l1 = (mask * (p_lin - depth).abs()).sum() / (valid_pix + 1e-6)
-        loss = 0.5 * silog_loss(pred, depth, mask) + 0.5 * l1
+        # pertes stables en log-espace (pas d'exp ici)
+        loss = 0.7 * silog_loss(pred, depth, mask) + 0.3 * l1_masked(pred, depth, mask)
 
         if not torch.isfinite(loss):
             print("[skip] non-finite loss"); 
@@ -115,6 +119,8 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None):
 
         total += float(loss.item())
     return total / max(1, len(loader))
+
+
 
 
 
