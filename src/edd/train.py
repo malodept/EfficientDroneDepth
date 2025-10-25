@@ -80,7 +80,8 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None):
         if valid < 0.05:
             print(f"[warn] low valid ratio: {float(valid):.3f}")
 
-        loss = silog_loss(pred, depth, mask)
+        p_lin = torch.exp(pred)
+        loss = 0.5 * silog_loss(pred, depth, mask) + 0.5 * ((mask * (p_lin - depth).abs()).sum() / (mask.sum() + 1e-6))
 
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
@@ -133,9 +134,8 @@ def main():
 
     
     
-    optim = AdamW(model.parameters(), lr=1e-3, weight_decay=1e-2)
-    sched  = OneCycleLR(optim, max_lr=1e-3, steps_per_epoch=len(train_loader),
-                        epochs=args.epochs, pct_start=0.1)
+    optim = AdamW(model.parameters(), lr=1e-3, weight_decay=5e-3)
+    sched  = CosineAnnealingLR(optim, T_max=args.epochs, eta_min=3e-4)
 
 
     best = 9e9
@@ -146,6 +146,7 @@ def main():
         tr = train_one_epoch(model, train_loader, optim, device, scheduler=sched)
         va, met = validate(model, val_loader, device)
         print(f"[epoch {epoch}] train={tr:.4f} val={va:.4f} AbsRel={met['AbsRel']:.4f} RMSE={met['RMSE']:.4f} d1.25={met['Delta<1.25']:.4f} time={time.time()-t0:.1f}s")
+        print(f"[epoch {epoch}] lr={sched.get_last_lr()[0]:.2e} train={tr:.4f} val={va:.4f} ...")
         if va < best:
             best = va
             torch.save({"model": model.state_dict(), "args": vars(args)}, args.ckpt)
