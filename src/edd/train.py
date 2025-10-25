@@ -52,7 +52,6 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None):
                 print("[dbg] logD mean:", float(ps.mean()),
                       "target mean:", float(depth[:1].mean()),
                       "mask%:", float(mask.mean()))
-                # dump visus
                 try:
                     import numpy as np, imageio.v2 as imageio
                     x = img[0].detach().cpu().numpy().transpose(1,2,0)
@@ -61,32 +60,48 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None):
                     y = depth[0,0].detach().cpu().numpy()
                     p = pred[0,0].detach().cpu().numpy()
                     p_lin = np.exp(p)
-                    y_viz = (np.clip(y/np.percentile(y,99), 0, 1)*255).astype(np.uint8)
-                    p_viz = (np.clip(p_lin/np.percentile(p_lin,99), 0, 1)*255).astype(np.uint8)
+                    y_viz = (np.clip(y/ max(1e-6, np.percentile(y, 99)), 0, 1)*255).astype(np.uint8)
+                    p_viz = (np.clip(p_lin/ max(1e-6, np.percentile(p_lin, 99)), 0, 1)*255).astype(np.uint8)
                     imageio.imwrite("runs/figures/rgb.png",  x)
                     imageio.imwrite("runs/figures/gt.png",   y_viz)
                     imageio.imwrite("runs/figures/pred.png", p_viz)
                     print("[dump] runs/figures/{rgb,gt,pred}.png")
                 except Exception as e:
                     print("[dump skipped]", repr(e))
-            # paramètre de référence pour delta|w|
             for n, p0 in model.named_parameters():
                 if p0.requires_grad and p0.dim() >= 2:
                     ref_name, ref_w = n, p0.detach().clone()
                     print("[ref]", n, tuple(p0.shape))
                     break
 
-        valid = mask.sum() / mask.numel()
-        if valid < 0.05:
-            print(f"[warn] low valid ratio: {float(valid):.3f}")
+        # gardes validité masque
+        valid_pix = mask.sum()
+        if valid_pix < 1:
+            print("[skip] no valid pixels"); 
+            continue
 
+        valid_ratio = valid_pix / mask.numel()
+        if valid_ratio < 0.05:
+            print(f"[warn] low valid ratio: {float(valid_ratio):.3f}")
+
+        # perte stable
         p_lin = torch.exp(pred)
-        loss = 0.5 * silog_loss(pred, depth, mask) + 0.5 * ((mask * (p_lin - depth).abs()).sum() / (mask.sum() + 1e-6))
+        l1 = (mask * (p_lin - depth).abs()).sum() / (valid_pix + 1e-6)
+        loss = 0.5 * silog_loss(pred, depth, mask) + 0.5 * l1
+
+        if not torch.isfinite(loss):
+            print("[skip] non-finite loss"); 
+            continue
 
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         gn = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        print(f"[grad] ||g||={float(gn):.3e}" if i == 0 else "", end="")
+        if not torch.isfinite(gn):
+            print("[skip] non-finite grad"); 
+            continue
+
+        if i == 0:
+            print(f"[grad] ||g||={float(gn):.3e}", end="")
 
         optimizer.step()
         if scheduler is not None:
@@ -98,8 +113,9 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None):
             print(f"  [delta] {ref_name} mean|Δw|={dn:.3e}")
             ref_w = w.clone()
 
-        total += loss.item()
+        total += float(loss.item())
     return total / max(1, len(loader))
+
 
 
 
@@ -132,11 +148,8 @@ def main():
         overfit_one_batch(model, train_loader, device, steps=200, lr=1e-2)
         return
 
-    
-    
-    optim = AdamW(model.parameters(), lr=1e-3, weight_decay=5e-3)
-    sched  = CosineAnnealingLR(optim, T_max=args.epochs, eta_min=3e-4)
-
+    optim = AdamW(model.parameters(), lr=8e-4, weight_decay=5e-3)
+    sched = CosineAnnealingLR(optim, T_max=args.epochs, eta_min=4e-4)
 
     best = 9e9
     print("batches:", len(train_loader), len(val_loader))
@@ -145,13 +158,15 @@ def main():
         t0 = time.time()
         tr = train_one_epoch(model, train_loader, optim, device, scheduler=sched)
         va, met = validate(model, val_loader, device)
-        print(f"[epoch {epoch}] train={tr:.4f} val={va:.4f} AbsRel={met['AbsRel']:.4f} RMSE={met['RMSE']:.4f} d1.25={met['Delta<1.25']:.4f} time={time.time()-t0:.1f}s")
-        print(f"[epoch {epoch}] lr={sched.get_last_lr()[0]:.2e} train={tr:.4f} val={va:.4f} ...")
+        print(f"[epoch {epoch}] lr={sched.get_last_lr()[0]:.2e} "
+              f"train={tr:.4f} val={va:.4f} AbsRel={met['AbsRel']:.4f} "
+              f"RMSE={met['RMSE']:.4f} d1.25={met['Delta<1.25']:.4f} time={time.time()-t0:.1f}s")
         if va < best:
             best = va
             torch.save({"model": model.state_dict(), "args": vars(args)}, args.ckpt)
             print(f"[ckpt] saved -> {args.ckpt}")
     print("[done]")
+
 
 
 

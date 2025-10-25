@@ -66,10 +66,12 @@ def _align(pred, target, mask, eps=1e-6):
 
 def silog_loss(pred, target, mask, eps=1e-6):
     pred, target, mask = _align(pred, target, mask, eps)
-    # pred est log(depth) ; target_log = log(target)
-    d = ((pred - target.log()) * mask)
-    valid = mask.sum() + eps
-    return ((d**2).sum() - (d.sum()**2)/valid) / valid
+    valid = mask.sum()
+    if valid < 1:  # aucun pixel valide
+        return pred.new_tensor(0.0)
+    d = (pred - target.log()) * mask
+    return ((d**2).sum() - (d.sum()**2)/ (valid + eps)) / (valid + eps)
+
 
 def l1_masked(pred, target, mask, eps=1e-6):
     pred, target, mask = _align(pred, target, mask, eps)

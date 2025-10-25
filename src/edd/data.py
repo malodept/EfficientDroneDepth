@@ -29,12 +29,18 @@ def _read_depth(path, size):
     if d is None: raise FileNotFoundError(path)
     if d.ndim == 3: d = d[...,0]
     d = _resize_pad(d, size, cv2.INTER_NEAREST).astype(np.float32)
+
+    # nettoie les non-finies
+    d[~np.isfinite(d)] = 0.0
+
     mx = float(d.max())
     if mx > 5000:   d /= 1000.0   # mm→m
     elif mx <= 255: d /= 100.0    # cm→m
+
     d = np.clip(d, 0.0, 80.0)
-    m = (d > 1e-6).astype(np.float32)
+    m = ((d > 1e-6) & np.isfinite(d)).astype(np.float32)
     return d, m
+
 
 
 
