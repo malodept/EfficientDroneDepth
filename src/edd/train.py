@@ -38,15 +38,16 @@ def overfit_one_batch(model, loader, device, steps=200, lr=1e-2):
 def _grad_xy(x):
     return x[..., 1:, :] - x[..., :-1, :], x[..., :, 1:] - x[..., :, :-1]
 
+def _grad_xy(x):
+    return x[...,1:,:]-x[...,:-1,:], x[...,:,1:]-x[...,:,:-1]
+
 def grad_loss_log(pred, target, mask, eps=1e-6):
-    # log-espace déjà : pred ~ log(D), target_log = log(target)
-    p, t, m = _align(pred, target, mask, eps)  
-    gx_p, gy_p = _grad_xy(p)
-    gx_t, gy_t = _grad_xy(t.log())
-    gx_m, gy_m = _grad_xy(m)
-    l = (gx_m * (gx_p - gx_t).abs()).sum() + (gy_m * (gy_p - gy_t).abs()).sum()
-    v = gx_m.sum() + gy_m.sum() + eps
-    return l / v
+    p,t,m = _align(pred, target, mask, eps)
+    gx_p, gy_p = _grad_xy(p); gx_t, gy_t = _grad_xy(t.log()); gx_m, gy_m = _grad_xy(m)
+    num = (gx_m*(gx_p-gx_t).abs()).sum() + (gy_m*(gy_p-gy_t).abs()).sum()
+    den = gx_m.sum() + gy_m.sum() + eps
+    return num/den
+
 
 
 def train_one_epoch(model, loader, optimizer, device, scheduler=None):
@@ -108,9 +109,10 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None):
 
 
         # pertes stables en log-espace (pas d'exp ici)
-        loss = 0.6 * silog_loss(pred, depth, mask) \
-             + 0.2 * l1_masked(pred, depth, mask) \
-             + 0.2 * grad_loss_log(pred, depth, mask)
+        loss = 0.6*silog_loss(pred, depth, mask) \
+            + 0.2*l1_masked(pred, depth, mask) \
+            + 0.2*grad_loss_log(pred, depth, mask)
+
 
         if not torch.isfinite(loss):
             print("[skip] non-finite loss"); 
@@ -178,7 +180,7 @@ def main():
         (backbone_params if "backbone" in n else head_params).append(p)
 
     optim = AdamW(model.parameters(), lr=5e-4, weight_decay=5e-3)
-    sched  = CosineAnnealingLR(optim, T_max=args.epochs, eta_min=1e-5)
+    sched = CosineAnnealingLR(optim, T_max=args.epochs, eta_min=2e-4)
 
 
     best = 9e9
