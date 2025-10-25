@@ -23,8 +23,22 @@ def parse_args():
     ap.add_argument("--num_workers", type=int, default=0)
     return ap.parse_args()
 
+def overfit_one_batch(model, loader, device, steps=200, lr=1e-2):
+    model.train()
+    batch = next(iter(loader))
+    img = batch["image"].to(device); depth = batch["depth"].to(device); mask = batch["mask"].to(device)
+    opt = torch.optim.AdamW(model.parameters(), lr=lr)
+    for t in range(steps):
+        pred = model(img)
+        loss = silog_loss(pred, depth, mask)  # simple et stable
+        opt.zero_grad(); loss.backward(); opt.step()
+        if (t+1)%20==0:
+            print(f"[overfit] step {t+1} loss={loss.item():.4f}")
+
 def train_one_epoch(model, loader, optimizer, device, scheduler=None):
     model.train(); total = 0.0
+    ref_name, ref_w = None, None
+
     for i, batch in enumerate(loader):
         img   = batch["image"].to(device, non_blocking=True)
         depth = batch["depth"].to(device, non_blocking=True)
@@ -34,12 +48,11 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None):
 
         if i == 0:
             with torch.no_grad():
-                # logs rapides
                 ps = pred[:1]
                 print("[dbg] logD mean:", float(ps.mean()),
                       "target mean:", float(depth[:1].mean()),
                       "mask%:", float(mask.mean()))
-                # dump visus alignement
+                # dump visus
                 try:
                     import numpy as np, imageio.v2 as imageio
                     x = img[0].detach().cpu().numpy().transpose(1,2,0)
@@ -56,23 +69,38 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None):
                     print("[dump] runs/figures/{rgb,gt,pred}.png")
                 except Exception as e:
                     print("[dump skipped]", repr(e))
+            # paramètre de référence pour delta|w|
+            for n, p0 in model.named_parameters():
+                if p0.requires_grad and p0.dim() >= 2:
+                    ref_name, ref_w = n, p0.detach().clone()
+                    print("[ref]", n, tuple(p0.shape))
+                    break
 
         valid = mask.sum() / mask.numel()
         if valid < 0.05:
             print(f"[warn] low valid ratio: {float(valid):.3f}")
 
-        # perte (log-space): ajuste si besoin
-        loss = 0.9 * silog_loss(pred, depth, mask) + 0.1 * l1_masked(pred, depth, mask)
+        # perte en log-espace (amplifiée pour gradient plus net)
+        loss = 10.0 * silog_loss(pred, depth, mask)
 
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        gn = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        print(f"[grad] ||g||={float(gn):.3e}" if i == 0 else "", end="")
+
         optimizer.step()
         if scheduler is not None:
             scheduler.step()
 
+        if i == 0 and ref_name is not None:
+            w = dict(model.named_parameters())[ref_name].detach()
+            dn = (w - ref_w).abs().mean().item()
+            print(f"  [delta] {ref_name} mean|Δw|={dn:.3e}")
+            ref_w = w.clone()
+
         total += loss.item()
     return total / max(1, len(loader))
+
 
 
 
@@ -100,6 +128,10 @@ def main():
 
     model = DPTSmall(backbone_name=args.backbone, pretrained=True).to(device)
 
+    if True:
+        overfit_one_batch(model, train_loader, device, steps=200, lr=1e-2)
+        return
+
     optim = AdamW(model.parameters(), lr=3e-3, weight_decay=1e-2)
     sched = OneCycleLR(optim, max_lr=3e-3, steps_per_epoch=len(train_loader),
                        epochs=args.epochs, pct_start=0.1)
@@ -109,7 +141,7 @@ def main():
 
     for epoch in range(1, args.epochs + 1):
         t0 = time.time()
-        tr = train_one_epoch(model, train_loader, optim, device, scheduler=sched)  # ← step dans train_one_epoch
+        tr = train_one_epoch(model, train_loader, optim, device, scheduler=sched)
         va, met = validate(model, val_loader, device)
         print(f"[epoch {epoch}] train={tr:.4f} val={va:.4f} AbsRel={met['AbsRel']:.4f} RMSE={met['RMSE']:.4f} d1.25={met['Delta<1.25']:.4f} time={time.time()-t0:.1f}s")
         if va < best:
@@ -117,6 +149,7 @@ def main():
             torch.save({"model": model.state_dict(), "args": vars(args)}, args.ckpt)
             print(f"[ckpt] saved -> {args.ckpt}")
     print("[done]")
+
 
 
 if __name__ == "__main__":
