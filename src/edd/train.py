@@ -8,6 +8,7 @@ from torch.optim.lr_scheduler import OneCycleLR
 from rich import print
 from .data import make_loaders
 from .modeling import DPTSmall, silog_loss, l1_masked, depth_metrics, _align
+import imageio
 
 def parse_args():
     ap = argparse.ArgumentParser()
@@ -50,8 +51,10 @@ def grad_loss_log(pred, target, mask, eps=1e-6):
 
 
 
-def train_one_epoch(model, loader, optimizer, device, scheduler=None):
-    model.train(); total = 0.0
+def train_one_epoch(model, loader, optimizer, device, scheduler=None, val_loader=None):
+    import os, torch, numpy as np, imageio.v2 as imageio
+    model.train()
+    total = 0.0
     ref_name, ref_w = None, None
 
     for i, batch in enumerate(loader):
@@ -59,70 +62,70 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None):
         depth = batch["depth"].to(device, non_blocking=True)
         mask  = batch["mask"].to(device, non_blocking=True)
 
-        pred = model(img)  # logits = log(depth)
+        pred = model(img)
 
+        # --- dump mask & debug first batch only ---
         if i == 0:
-            with torch.no_grad():
-                ps = pred[:1]
-                print("[dbg] logD mean:", float(ps.mean()),
-                      "target mean:", float(depth[:1].mean()),
-                      "mask%:", float(mask.mean()))
-                # stats logits
-                print("[dbg] pred min/median/max:",
-                      float(pred.min()), float(pred.median()), float(pred.max()))
-                # dump visus sécurisé
-                try:
-                    import numpy as np, imageio.v2 as imageio
-                    x = img[0].detach().cpu().numpy().transpose(1,2,0)
-                    x = (x * np.array([0.229,0.224,0.225]) + np.array([0.485,0.456,0.406]))
-                    x = np.clip(x*255, 0, 255).astype(np.uint8)
-                    y = depth[0,0].detach().cpu().numpy()
-                    p = pred[0,0].detach().cpu().numpy()
-                    p_lin = np.exp(np.clip(p, -10, 10))  # clamp anti-overflow
-                    den_y = float(max(1e-6, np.percentile(y,     99)))
-                    den_p = float(max(1e-6, np.percentile(p_lin, 99)))
-                    y_viz = (np.clip(y/den_y,     0, 1)*255).astype(np.uint8)
-                    p_viz = (np.clip(p_lin/den_p, 0, 1)*255).astype(np.uint8)
-                    imageio.imwrite("runs/figures/rgb.png",  x)
-                    imageio.imwrite("runs/figures/gt.png",   y_viz)
-                    imageio.imwrite("runs/figures/pred.png", p_viz)
-                    print("[dump] runs/figures/{rgb,gt,pred}.png")
-                except Exception as e:
-                    print("[dump skipped]", repr(e))
+            os.makedirs("runs/figures", exist_ok=True)
+            mk = (mask[0,0].detach().cpu().numpy()*255).astype(np.uint8)
+            imageio.imwrite("runs/figures/mask.png", mk)
+
+            ps = pred[:1]
+            print("[dbg] logD mean:", float(ps.mean()),
+                  "target mean:", float(depth[:1].mean()),
+                  "mask%:", float(mask.mean()))
+            print("[dbg] pred min/median/max:",
+                  float(pred.min()), float(pred.median()), float(pred.max()))
+
+            # visu RGB / GT / Pred
+            try:
+                x = img[0].detach().cpu().numpy().transpose(1,2,0)
+                x = (x * np.array([0.229,0.224,0.225]) + np.array([0.485,0.456,0.406]))
+                x = np.clip(x*255, 0, 255).astype(np.uint8)
+                y = depth[0,0].detach().cpu().numpy()
+                p = pred[0,0].detach().cpu().numpy()
+                p_lin = np.exp(np.clip(p, -10, 10))
+                y_viz = (np.clip(y/np.percentile(y,99),0,1)*255).astype(np.uint8)
+                p_viz = (np.clip(p_lin/np.percentile(p_lin,99),0,1)*255).astype(np.uint8)
+                imageio.imwrite("runs/figures/rgb.png",  x)
+                imageio.imwrite("runs/figures/gt.png",   y_viz)
+                imageio.imwrite("runs/figures/pred.png", p_viz)
+                print("[dump] runs/figures/{rgb,gt,pred}.png")
+            except Exception as e:
+                print("[dump skipped]", repr(e))
+
+            # poids de référence pour mesurer Δw
             for n, p0 in model.named_parameters():
                 if p0.requires_grad and p0.dim() >= 2:
                     ref_name, ref_w = n, p0.detach().clone()
                     print("[ref]", n, tuple(p0.shape))
                     break
+        # ------------------------------------------
 
-        # gardes validité masque
+        # validité masque
         valid_pix = mask.sum()
         if valid_pix < 1:
-            print("[skip] no valid pixels"); 
+            print("[skip] no valid pixels")
             continue
+        valid_ratio = mask.mean().item()
+        print(f"[train] valid%≈{valid_ratio:.3f}")
 
-        valid_ratio = valid_pix / mask.numel()
-        if valid_ratio < 0.05:
-            print(f"[warn] low valid ratio: {float(valid_ratio):.3f}")
-        
         pred = torch.clamp(pred, -5.0, 5.0)
 
-
-        # pertes stables en log-espace (pas d'exp ici)
+        # pertes
         loss = 0.6*silog_loss(pred, depth, mask) \
-            + 0.2*l1_masked(pred, depth, mask) \
-            + 0.2*grad_loss_log(pred, depth, mask)
-
+             + 0.2*l1_masked(pred, depth, mask) \
+             + 0.2*grad_loss_log(pred, depth, mask)
 
         if not torch.isfinite(loss):
-            print("[skip] non-finite loss"); 
+            print("[skip] non-finite loss")
             continue
 
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         gn = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         if not torch.isfinite(gn):
-            print("[skip] non-finite grad"); 
+            print("[skip] non-finite grad")
             continue
 
         if i == 0:
@@ -135,11 +138,23 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None):
         if i == 0 and ref_name is not None:
             w = dict(model.named_parameters())[ref_name].detach()
             dn = (w - ref_w).abs().mean().item()
-            print(f"  [delta] {ref_name} mean|Δw|={dn:.3e}")
+            print(f"  [Δw] {ref_name} mean|Δw|={dn:.3e}")
             ref_w = w.clone()
 
         total += float(loss.item())
+
+    # --- validation mask% log (global, pas dans la boucle) ---
+    if val_loader is not None:
+        with torch.no_grad():
+            val_valid = 0.0
+            for batch in val_loader:
+                val_valid += batch["mask"].to(device).mean().item()
+            val_valid /= len(val_loader)
+            print(f"[val] valid%≈{val_valid:.3f}")
+    # ---------------------------------------------------------
+
     return total / max(1, len(loader))
+
 
 
 

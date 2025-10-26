@@ -25,21 +25,30 @@ def _read_image(path: str, size: int = 384):
     return np.transpose(img, (2, 0, 1))
 
 def _read_depth(path, size):
-    d = cv2.imread(str(path), cv2.IMREAD_ANYDEPTH)
-    if d is None: raise FileNotFoundError(path)
-    if d.ndim == 3: d = d[...,0]
-    d = _resize_pad(d, size, cv2.INTER_NEAREST).astype(np.float32)
+    d_raw = cv2.imread(str(path), cv2.IMREAD_ANYDEPTH)
+    if d_raw is None: raise FileNotFoundError(path)
+    if d_raw.ndim == 3: d_raw = d_raw[...,0]
 
-    # nettoie les non-finies
-    d[~np.isfinite(d)] = 0.0
+    # mask = pixels réellement valides du PNG brut
+    m = (d_raw > 0) & np.isfinite(d_raw)
 
+    # resize identique à l'image
+    d = _resize_pad(d_raw, size, cv2.INTER_NEAREST).astype(np.float32)
+    m = _resize_pad(m.astype(np.uint8), size, cv2.INTER_NEAREST).astype(bool)
+
+    # échelle cm/mm -> m
     mx = float(d.max())
-    if mx > 5000:   d /= 1000.0   # mm→m
-    elif mx <= 255: d /= 100.0    # cm→m
+    if mx > 5000:   d /= 1000.0
+    elif mx <= 255: d /= 100.0
 
-    d = np.clip(d, 0.01, 80.0)
-    m = ((d > 1e-6) & np.isfinite(d)).astype(np.float32)
+    # invalide → 0, ne relève PAS les petits depths
+    d = np.where(m, d, 0.0).astype(np.float32)
+    # borne haute seulement
+    d = np.clip(d, 0.0, 80.0)
+
+    m = m.astype(np.float32)
     return d, m
+
 
 
 

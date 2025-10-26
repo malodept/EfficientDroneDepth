@@ -85,12 +85,16 @@ def l1_masked(pred, target, mask, eps=1e-6):
 @torch.no_grad()
 def depth_metrics(pred, target, mask):
     eps = 1e-6
-    m = mask.bool()
-    p = pred[m].exp().clamp(min=eps)        # repasse en mètres
-    t = target[m].clamp(min=eps)
-    abs_rel = (torch.abs(p - t) / t).mean().item()
-    rmse = torch.sqrt(((p - t).pow(2)).mean()).item()
-    ratio = torch.max(p/t, t/p)
-    delta = (ratio < 1.25).float().mean().item()
+    m = mask > 0.5
+    # compare en linéaire
+    p = torch.clamp(torch.exp(pred), min=eps)[m]
+    t = torch.clamp(target,        min=eps)[m]
+    if p.numel() == 0:
+        return {"AbsRel": float('nan'), "RMSE": float('nan'), "Delta<1.25": 0.0}
+    abs_rel = torch.mean(torch.abs(p - t) / t).item()
+    rmse    = torch.sqrt(torch.mean((p - t) ** 2)).item()
+    ratio   = torch.max(p / t, t / p)
+    delta   = torch.mean((ratio < 1.25).float()).item()
     return {"AbsRel": abs_rel, "RMSE": rmse, "Delta<1.25": delta}
+
 
