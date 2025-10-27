@@ -37,21 +37,29 @@ def overfit_one_batch(model, loader, device, steps=200, lr=1e-2):
             print(f"[overfit] step {t+1} loss={loss.item():.4f}")
 
 def _grad_xy(x):
-    return x[..., 1:, :] - x[..., :-1, :], x[..., :, 1:] - x[..., :, :-1]
-
-def _grad_xy(x):
     return x[...,1:,:]-x[...,:-1,:], x[...,:,1:]-x[...,:,:-1]
 
 def grad_loss_log(pred, target, mask, eps=1e-6):
-    p,t,m = _align(pred, target, mask, eps)
-    gx_p, gy_p = _grad_xy(p); gx_t, gy_t = _grad_xy(t.log()); gx_m, gy_m = _grad_xy(m)
-    num = (gx_m*(gx_p-gx_t).abs()).sum() + (gy_m*(gy_p-gy_t).abs()).sum()
-    den = gx_m.sum() + gy_m.sum() + eps
-    return num/den
+    # aligne et filtre
+    p, t, m = _align(pred, target, mask, eps)
+    # évite log(0)
+    t = torch.clamp(t, min=1e-3)
+    # érode le masque pour ne garder que des paires valides
+    mx = m[...,1:,:] * m[...,:-1,:]
+    my = m[...,:,1:] * m[...,:,:-1]
+    # gradients
+    gx_p, gy_p = _grad_xy(p)
+    gx_t, gy_t = _grad_xy(torch.log(t))
+    # L1 pondérée par le masque
+    num = (mx * (gx_p - gx_t).abs()).sum() + (my * (gy_p - gy_t).abs()).sum()
+    den = mx.sum() + my.sum() + eps
+    return num / den
 
 
 
-def train_one_epoch(model, loader, optimizer, device, scheduler=None, val_loader=None):
+
+# --- train_one_epoch ---------------------------------------------------------
+def train_one_epoch(model, loader, optimizer, device, scheduler=None, val_loader=None, scaler=None):
     import os, torch, numpy as np, imageio.v2 as imageio
     model.train()
     total = 0.0
@@ -62,7 +70,15 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None, val_loader
         depth = batch["depth"].to(device, non_blocking=True)
         mask  = batch["mask"].to(device, non_blocking=True)
 
-        pred = model(img)
+        # forward + losses en AMP
+        with torch.cuda.amp.autocast(dtype=torch.float16):
+            pred = model(img)                       # logits = log(depth)
+            pred = torch.clamp(pred, -4.0, 4.0)     # clamp plus serré
+
+            # pertes log-espace uniquement
+            loss = 0.6*silog_loss(pred, depth, mask) \
+                 + 0.2*l1_masked(pred, depth, mask) \
+                 + 0.2*grad_loss_log(pred, depth, mask)
 
         # --- dump mask & debug first batch only ---
         if i == 0:
@@ -70,14 +86,13 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None, val_loader
             mk = (mask[0,0].detach().cpu().numpy()*255).astype(np.uint8)
             imageio.imwrite("runs/figures/mask.png", mk)
 
-            ps = pred[:1]
+            ps = pred[:1].detach()  # évite l’avertissement requires_grad
             print("[dbg] logD mean:", float(ps.mean()),
-                  "target mean:", float(depth[:1].mean()),
-                  "mask%:", float(mask.mean()))
+                  "target mean:", float(depth[:1].mean().detach()),
+                  "mask%:", float(mask.mean().detach()))
             print("[dbg] pred min/median/max:",
-                  float(pred.min()), float(pred.median()), float(pred.max()))
+                  float(pred.min().detach()), float(pred.median().detach()), float(pred.max().detach()))
 
-            # visu RGB / GT / Pred
             try:
                 x = img[0].detach().cpu().numpy().transpose(1,2,0)
                 x = (x * np.array([0.229,0.224,0.225]) + np.array([0.485,0.456,0.406]))
@@ -85,8 +100,8 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None, val_loader
                 y = depth[0,0].detach().cpu().numpy()
                 p = pred[0,0].detach().cpu().numpy()
                 p_lin = np.exp(np.clip(p, -10, 10))
-                y_viz = (np.clip(y/np.percentile(y,99),0,1)*255).astype(np.uint8)
-                p_viz = (np.clip(p_lin/np.percentile(p_lin,99),0,1)*255).astype(np.uint8)
+                y_viz = (np.clip(y/ max(1e-6, np.percentile(y,99)),0,1)*255).astype(np.uint8)
+                p_viz = (np.clip(p_lin/ max(1e-6, np.percentile(p_lin,99)),0,1)*255).astype(np.uint8)
                 imageio.imwrite("runs/figures/rgb.png",  x)
                 imageio.imwrite("runs/figures/gt.png",   y_viz)
                 imageio.imwrite("runs/figures/pred.png", p_viz)
@@ -94,7 +109,6 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None, val_loader
             except Exception as e:
                 print("[dump skipped]", repr(e))
 
-            # poids de référence pour mesurer Δw
             for n, p0 in model.named_parameters():
                 if p0.requires_grad and p0.dim() >= 2:
                     ref_name, ref_w = n, p0.detach().clone()
@@ -102,36 +116,32 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None, val_loader
                     break
         # ------------------------------------------
 
-        # validité masque
+        # garde validité masque
         valid_pix = mask.sum()
         if valid_pix < 1:
             print("[skip] no valid pixels")
             continue
-        valid_ratio = mask.mean().item()
-        print(f"[train] valid%≈{valid_ratio:.3f}")
-
-        pred = torch.clamp(pred, -5.0, 5.0)
-
-        # pertes
-        loss = 0.6*silog_loss(pred, depth, mask) \
-             + 0.2*l1_masked(pred, depth, mask) \
-             + 0.2*grad_loss_log(pred, depth, mask)
+        print(f"[train] valid%≈{mask.mean().item():.3f}")
 
         if not torch.isfinite(loss):
             print("[skip] non-finite loss")
             continue
 
         optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        gn = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        # backward en AMP + clipping 0.1
+        scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
+        gn = torch.nn.utils.clip_grad_norm_(model.parameters(), 0.1)
         if not torch.isfinite(gn):
             print("[skip] non-finite grad")
+            optimizer.zero_grad(set_to_none=True)
             continue
 
         if i == 0:
             print(f"[grad] ||g||={float(gn):.3e}", end="")
 
-        optimizer.step()
+        scaler.step(optimizer)
+        scaler.update()
         if scheduler is not None:
             scheduler.step()
 
@@ -141,17 +151,16 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None, val_loader
             print(f"  [Δw] {ref_name} mean|Δw|={dn:.3e}")
             ref_w = w.clone()
 
-        total += float(loss.item())
+        total += float(loss.detach().item())
 
-    # --- validation mask% log (global, pas dans la boucle) ---
+    # validation: log du %valide
     if val_loader is not None:
         with torch.no_grad():
             val_valid = 0.0
             for batch in val_loader:
                 val_valid += batch["mask"].to(device).mean().item()
-            val_valid /= len(val_loader)
+            val_valid /= max(1, len(val_loader))
             print(f"[val] valid%≈{val_valid:.3f}")
-    # ---------------------------------------------------------
 
     return total / max(1, len(loader))
 
@@ -163,19 +172,33 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None, val_loader
 
 
 
+
+# --- validate ---------------------------------------------------------------
 def validate(model, loader, device):
     model.eval(); total = 0.0
     m = {"AbsRel":0.0,"RMSE":0.0,"Delta<1.25":0.0}; n=0
-    for batch in loader:
-        img = batch["image"].to(device); depth = batch["depth"].to(device); mask = batch["mask"].to(device)
-        pred = model(img)
-        loss = 0.7 * silog_loss(pred, depth, mask) + 0.3 * l1_masked(pred, depth, mask)
-        metrics = depth_metrics(pred, depth, mask)
-        for k in m: m[k] += metrics[k]
-        total += loss.item(); n+=1
-    for k in m: m[k] /= max(1,n)
-    return total / max(1,len(loader)), m
+    with torch.no_grad(), torch.cuda.amp.autocast(dtype=torch.float16):
+        for batch in loader:
+            img   = batch["image"].to(device, non_blocking=True)
+            depth = batch["depth"].to(device, non_blocking=True)
+            mask  = batch["mask"].to(device, non_blocking=True)
 
+            pred = model(img)                  # logits
+            pred = torch.clamp(pred, -8.0, 8.0)
+
+            loss = 0.6*silog_loss(pred, depth, mask) \
+                 + 0.2*l1_masked(pred, depth, mask) \
+                 + 0.2*grad_loss_log(pred, depth, mask)
+
+            metrics = depth_metrics(pred, depth, mask)  # doit accepter logits
+            for k in m: m[k] += float(metrics[k])
+            total += float(loss.detach().item()); n += 1
+
+    for k in m: m[k] /= max(1, n)
+    return total / max(1, n), m
+
+
+# --- main -------------------------------------------------------------------
 def main():
     args = parse_args(); os.makedirs("runs", exist_ok=True)
     device = "cuda" if torch.cuda.is_available() else "cpu"; print(f"[device] {device}")
@@ -190,34 +213,46 @@ def main():
         overfit_one_batch(model, train_loader, device, steps=200, lr=1e-2)
         return
 
-    backbone_params, head_params = [], []
-    for n,p in model.named_parameters():
-        (backbone_params if "backbone" in n else head_params).append(p)
+    # optimizer + scheduler
+    optim = AdamW(model.parameters(), lr=1e-4, weight_decay=5e-3)
+    sched = CosineAnnealingLR(optim, T_max=args.epochs, eta_min=1e-5)
 
-    optim = AdamW(model.parameters(), lr=5e-4, weight_decay=5e-3)
-    sched = CosineAnnealingLR(optim, T_max=args.epochs, eta_min=2e-4)
+    # GradScaler
+    scaler = torch.cuda.amp.GradScaler()
 
+    # helpers: freeze/unfreeze backbone au démarrage
+    def set_backbone_trainable(net, flag: bool):
+        for n,p in net.named_parameters():
+            if n.startswith("backbone."):
+                p.requires_grad = flag
 
     best = 9e9
     print("batches:", len(train_loader), len(val_loader))
 
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(args.epochs):
+        # freeze epoch 0, unfreeze ensuite
+        if epoch == 0:
+            set_backbone_trainable(model, False)
+        elif epoch == 1:
+            set_backbone_trainable(model, True)
+
         t0 = time.time()
-        tr = train_one_epoch(model, train_loader, optim, device, scheduler=sched)
-        if epoch <= 3:
-            for g in optim.param_groups:
-                if g["lr"] > 2e-4:
-                    g["lr"] = 5e-4
+        tr = train_one_epoch(model, train_loader, optim, device,
+                             scheduler=sched, val_loader=val_loader, scaler=scaler)
         va, met = validate(model, val_loader, device)
+
         lrs = [f"{g['lr']:.2e}" for g in optim.param_groups]
-        print(f"[epoch {epoch}] lrs={lrs} train={tr:.4f} val={va:.4f} "
+        print(f"[epoch {epoch+1}] lrs={lrs} train={tr:.4f} val={va:.4f} "
               f"AbsRel={met['AbsRel']:.4f} RMSE={met['RMSE']:.4f} d1.25={met['Delta<1.25']:.4f} "
               f"time={time.time()-t0:.1f}s")
+
         if va < best:
             best = va
             torch.save({"model": model.state_dict(), "args": vars(args)}, args.ckpt)
             print(f"[ckpt] saved -> {args.ckpt}")
+
     print("[done]")
+
 
 
 
