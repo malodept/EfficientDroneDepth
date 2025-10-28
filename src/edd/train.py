@@ -9,6 +9,7 @@ from rich import print
 from .data import make_loaders
 from .modeling import DPTSmall, silog_loss, l1_masked, depth_metrics, _align
 import imageio
+from torch.amp import autocast, GradScaler
 
 def parse_args():
     ap = argparse.ArgumentParser()
@@ -56,7 +57,7 @@ def grad_loss_log(pred, target, mask, eps=1e-6):
     return num / den
 
 
-
+scaler = GradScaler(device_type="cuda")
 
 # --- train_one_epoch ---------------------------------------------------------
 def train_one_epoch(model, loader, optimizer, device, scheduler=None, val_loader=None, scaler=None):
@@ -71,14 +72,12 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None, val_loader
         mask  = batch["mask"].to(device, non_blocking=True)
 
         # forward + losses en AMP
-        with torch.cuda.amp.autocast(dtype=torch.float16):
-            pred = model(img)                       # logits = log(depth)
-            pred = torch.clamp(pred, -4.0, 4.0)     # clamp plus serré
-
-            # pertes log-espace uniquement
+        with autocast(device_type="cuda", dtype=torch.float16):
+            pred = model(img)
+            pred = torch.clamp(pred, -4.0, 4.0)
             loss = 0.6*silog_loss(pred, depth, mask) \
-                 + 0.2*l1_masked(pred, depth, mask) \
-                 + 0.2*grad_loss_log(pred, depth, mask)
+                + 0.2*l1_masked(pred, depth, mask) \
+                + 0.2*grad_loss_log(pred, depth, mask)
 
         # --- dump mask & debug first batch only ---
         if i == 0:
@@ -121,7 +120,7 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None, val_loader
         if valid_pix < 1:
             print("[skip] no valid pixels")
             continue
-        print(f"[train] valid%≈{mask.mean().item():.3f}")
+        #print(f"[train] valid%≈{mask.mean().item():.3f}")
 
         if not torch.isfinite(loss):
             print("[skip] non-finite loss")
@@ -177,7 +176,7 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None, val_loader
 def validate(model, loader, device):
     model.eval(); total = 0.0
     m = {"AbsRel":0.0,"RMSE":0.0,"Delta<1.25":0.0}; n=0
-    with torch.no_grad(), torch.cuda.amp.autocast(dtype=torch.float16):
+    with torch.no_grad(), autocast(device_type="cuda", dtype=torch.float16):
         for batch in loader:
             img   = batch["image"].to(device, non_blocking=True)
             depth = batch["depth"].to(device, non_blocking=True)
