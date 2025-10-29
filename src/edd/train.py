@@ -7,7 +7,7 @@ import random
 import matplotlib.pyplot as plt
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from torch.optim.lr_scheduler import OneCycleLR
+from collections import defaultdict
 from rich import print
 from .data import make_loaders
 from .modeling import DPTSmall, silog_loss, l1_masked, depth_metrics, _align
@@ -191,8 +191,8 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None, val_loader
 def validate(model, loader, device):
     model.eval()
     total = 0.0
-    metr_sum = None
-    n = 0
+    metr_sum = defaultdict(float)   # accumulate safely
+    n = 0                           # number of valid batches for metrics
     with torch.no_grad(), autocast(device_type="cuda", dtype=torch.float16):
         for batch in loader:
             img   = batch["image"].to(device, non_blocking=True)
@@ -201,6 +201,10 @@ def validate(model, loader, device):
             pred_log = torch.clamp(model(img), -4.0, 4.0)
             pred_lin = torch.exp(pred_log)
             mdict    = depth_metrics(pred_lin, depth, mask)  # métriques en linéaire
+            # ignore empty/None metrics
+            if not mdict:
+                total += float(silog_loss(pred_log, depth, mask).float().item())
+                continue
             # dump une seule fois sur la première itération val
             if n == 0:
                 vd = Path("runs/debug/val")
@@ -225,12 +229,18 @@ def validate(model, loader, device):
                     plt.figure(figsize=(4,3)); plt.hist(a, bins=80); plt.title(name)
                     plt.tight_layout(); plt.savefig(vd/("hist_"+name+".png")); plt.close()
 
-            for k,v in mdict.items():
-                metr_sum[k] += float(v)
+            # accumulate only finite values
+            for k, v in mdict.items():
+                try:
+                    fv = float(v)
+                except Exception:
+                    continue
+                if math.isfinite(fv):
+                    metr_sum[k] += fv
             total += float(silog_loss(pred_log, depth, mask).float().item())
             n += 1
     n = max(1, n)
-    metr_avg = {k: v / n for k, v in metr_sum.items()} if metr_sum is not None else {}
+    metr_avg = {k: v / n for k, v in metr_sum.items()} if len(metr_sum) else {}
     return total / n, metr_avg
 
 
