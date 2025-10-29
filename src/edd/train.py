@@ -148,7 +148,8 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None, val_loader
 def validate(model, loader, device):
     model.eval()
     total = 0.0
-    metr  = []
+    metr_sum = None
+    n = 0
     with torch.no_grad(), autocast(device_type="cuda", dtype=torch.float16):
         for batch in loader:
             img   = batch["image"].to(device, non_blocking=True)
@@ -156,12 +157,16 @@ def validate(model, loader, device):
             mask  = batch["mask"].to(device, non_blocking=True)
             pred_log = torch.clamp(model(img), -4.0, 4.0)
             pred_lin = torch.exp(pred_log)
-            m        = depth_metrics(pred_lin, depth, mask)  # métriques en linéaire
-            metr.append(m)
+            mdict    = depth_metrics(pred_lin, depth, mask)  # métriques en linéaire
+            if metr_sum is None:
+                metr_sum = {k: 0.0 for k in mdict}
+            for k,v in mdict.items():
+                metr_sum[k] += float(v)
             total += float(silog_loss(pred_log, depth, mask).float().item())
-
-    for k in m: m[k] /= max(1, n)
-    return total / max(1, n), m
+            n += 1
+    n = max(1, n)
+    metr_avg = {k: v / n for k, v in metr_sum.items()} if metr_sum is not None else {}
+    return total / n, metr_avg
 
 
 # --- main -------------------------------------------------------------------
