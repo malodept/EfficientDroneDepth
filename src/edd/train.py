@@ -9,7 +9,7 @@ from rich import print
 from .data import make_loaders
 from .modeling import DPTSmall, silog_loss, l1_masked, depth_metrics, _align
 import imageio
-from torch.amp import autocast, GradScaler
+from torch.amp import autocast
 
 def parse_args():
     ap = argparse.ArgumentParser()
@@ -57,8 +57,6 @@ def grad_loss_log(pred, target, mask, eps=1e-6):
     return num / den
 
 
-scaler = GradScaler(device_type="cuda")
-
 # --- train_one_epoch ---------------------------------------------------------
 def train_one_epoch(model, loader, optimizer, device, scheduler=None, val_loader=None, scaler=None):
     import os, torch, numpy as np, imageio.v2 as imageio
@@ -78,6 +76,20 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None, val_loader
             loss = 0.6*silog_loss(pred, depth, mask) \
                 + 0.2*l1_masked(pred, depth, mask) \
                 + 0.2*grad_loss_log(pred, depth, mask)
+
+        # backward + step (AMP-safe, CPU-safe)
+        if scaler is not None:
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+        else:
+            loss.backward()
+        gn = torch.nn.utils.clip_grad_norm_(model.parameters(), 0.1)
+        if scaler is not None:
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            optimizer.step()
+        # scheduler stepped per-epoch in main()
 
         # --- dump mask & debug first batch only ---
         if i == 0:
@@ -214,10 +226,12 @@ def main():
 
     # optimizer + scheduler
     optim = AdamW(model.parameters(), lr=1e-4, weight_decay=5e-3)
-    sched = CosineAnnealingLR(optim, T_max=args.epochs, eta_min=1e-5)
 
-    # GradScaler
-    scaler = torch.cuda.amp.GradScaler()
+    # GradScaler (PyTorch 2.8): use torch.amp.GradScaler
+    scaler = (torch.amp.GradScaler("cuda") if device == "cuda" else None)
+    
+    # CosineAnnealingLR stepped once per epoch (see end of epoch loop)
+    sched = CosineAnnealingLR(optim, T_max=args.epochs, eta_min=1e-5)
 
     # helpers: freeze/unfreeze backbone au démarrage
     def set_backbone_trainable(net, flag: bool):
@@ -250,6 +264,10 @@ def main():
             torch.save({"model": model.state_dict(), "args": vars(args)}, args.ckpt)
             print(f"[ckpt] saved -> {args.ckpt}")
 
+        # step scheduler once per epoch (after validation and potential ckpt)
+        if sched is not None:
+            sched.step()
+    
     print("[done]")
 
 
