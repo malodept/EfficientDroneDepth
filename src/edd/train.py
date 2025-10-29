@@ -1,7 +1,10 @@
 # src/edd/train.py
 import os, time, argparse
 import torch
-import torch.nn as nn
+from pathlib import Path
+import csv
+import random
+import matplotlib.pyplot as plt
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.optim.lr_scheduler import OneCycleLR
@@ -62,24 +65,30 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None, val_loader
     import os, torch, numpy as np, imageio.v2 as imageio
     model.train()
     total = 0.0
-    ref_name, ref_w = None, None
+    # dossier debug (par epoch)
+    dbg_dir = Path("runs/debug") / f"epoch_{int(time.time())}"
+    dbg_dir.mkdir(parents=True, exist_ok=True)
+    # logger CSV des pertes (header)
+    csv_path = dbg_dir / "batch_losses.csv"
+    with open(csv_path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["step", "lr", "loss", "silog", "l1_lin", "grad_log", "gnorm"])
 
     for i, batch in enumerate(loader):
         img   = batch["image"].to(device, non_blocking=True)
         depth = batch["depth"].to(device, non_blocking=True)
         mask  = batch["mask"].to(device, non_blocking=True)
 
-        # forward + losses en AMP
+        # forward + pertes en AMP
         with autocast(device_type="cuda", dtype=torch.float16):
-            pred_log = model(img)                           # log(depth) côté réseau
+            pred_log = model(img)                    # log(depth)
             pred_log = torch.clamp(pred_log, -4.0, 4.0)
-            pred_lin = torch.exp(pred_log)                  # repasse en linéaire pour les termes linéaires
-            # pertes cohérentes d'échelle
-            loss = (
-                0.6*silog_loss(pred_log, depth, mask)       # silog attend log vs lin → interne gère log(depth)
-                + 0.2*l1_masked(pred_lin, depth, mask)      # L1 en linéaire
-                + 0.2*grad_loss_log(pred_log, depth, mask)  # gradient en log
-            ).float()
+            pred_lin = torch.exp(pred_log)           # pour les termes en linéaire
+            # décompose les pertes pour logging
+            sil = silog_loss(pred_log, depth, mask)
+            l1  = l1_masked(pred_lin,  depth, mask)
+            grd = grad_loss_log(pred_log, depth, mask)
+            loss = (0.6*sil + 0.2*l1 + 0.2*grd).float()
 
         # --- debug first batch only, SANS GRAD ---
         if i == 0:
@@ -105,6 +114,28 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None, val_loader
                     imageio.imwrite("runs/figures/pred.png", p_viz)
                 except Exception as e:
                     print("[dbg] viz error:", e)
+            # Histogrammes rapides & scatter pour le batch 0
+            with torch.no_grad():
+                def _save_hist(arr, title, fn):
+                    arr = arr.flatten().detach().float().cpu().numpy()
+                    plt.figure(figsize=(4,3))
+                    plt.hist(arr, bins=80)
+                    plt.title(title)
+                    plt.tight_layout()
+                    plt.savefig(fn); plt.close()
+                _save_hist(pred_log[:1].float(), "pred_log", dbg_dir/"hist_pred_log_b0.png")
+                _save_hist(pred_lin[:1].float(), "pred_lin", dbg_dir/"hist_pred_lin_b0.png")
+                _save_hist(depth[:1].float(),    "depth_lin", dbg_dir/"hist_depth_lin_b0.png")
+                # scatter calibrage
+                x = depth[:1,0].flatten().detach().float().cpu().numpy()
+                y = pred_lin[:1,0].flatten().detach().float().cpu().numpy()
+                m = mask[:1,0].flatten().detach().float().cpu().numpy() > 0.5
+                x, y = x[m][::10], y[m][::10]
+                plt.figure(figsize=(4,4)); plt.scatter(x, y, s=4)
+                plt.xlabel("GT depth"); plt.ylabel("Pred depth")
+                lim = (0, max(1e-6, np.percentile(np.r_[x,y], 99)))
+                plt.xlim(lim); plt.ylim(lim); plt.plot(lim, lim)
+                plt.tight_layout(); plt.savefig(dbg_dir/"scatter_gt_vs_pred_b0.png"); plt.close()
 
         optimizer.zero_grad(set_to_none=True)
         # backward unique + clipping 0.1
@@ -118,11 +149,22 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None, val_loader
             loss.backward()
             gn = torch.nn.utils.clip_grad_norm_(model.parameters(), 0.1)
             optimizer.step()
+        # log CSV (append)
+        with open(csv_path, "a", newline="") as f:
+            w = csv.writer(f)
+            lr0 = optimizer.param_groups[0]["lr"]
+            try:
+                gn_val = float(gn)
+            except Exception:
+                gn_val = float(gn.detach().item()) if hasattr(gn, "detach") else 0.0
+            w.writerow([i, f"{lr0:.3e}", float(loss.detach().item()),
+                        float(sil.detach().item()), float(l1.detach().item()), float(grd.detach().item()),
+                        gn_val])
         # scheduler: step par ÉPOQUE (pas ici)
 
         total += float(loss.detach().item())
         # libère le graphe au plus tôt
-        del loss, pred_log, pred_lin
+        del loss, pred_log, pred_lin, sil, l1, grd
 
     # validation: log du %valide
     if val_loader is not None:
@@ -158,8 +200,24 @@ def validate(model, loader, device):
             pred_log = torch.clamp(model(img), -4.0, 4.0)
             pred_lin = torch.exp(pred_log)
             mdict    = depth_metrics(pred_lin, depth, mask)  # métriques en linéaire
-            if metr_sum is None:
-                metr_sum = {k: 0.0 for k in mdict}
+            # dump une seule fois sur la première itération val
+            if n == 0:
+                vd = Path("runs/debug/val")
+                vd.mkdir(parents=True, exist_ok=True)
+                x = depth[:,0][mask[:,0] > 0.5].detach().float().cpu().numpy()
+                y = pred_lin[:,0][mask[:,0] > 0.5].detach().float().cpu().numpy()
+                x_, y_ = x[::50], y[::50]
+                if x_.size > 10:
+                    plt.figure(figsize=(4,4)); plt.scatter(x_, y_, s=4)
+                    lim = (0, max(1e-6, np.percentile(np.r_[x_,y_], 99)))
+                    plt.xlim(lim); plt.ylim(lim); plt.plot(lim, lim)
+                    plt.xlabel("GT depth"); plt.ylabel("Pred depth")
+                    plt.tight_layout(); plt.savefig(vd/"scatter_val_gt_vs_pred.png"); plt.close()
+                for arr, name in [(pred_log, "pred_log"), (pred_lin, "pred_lin"), (depth, "depth_lin")]:
+                    a = arr.detach().float().cpu().numpy().ravel()[::50]
+                    plt.figure(figsize=(4,3)); plt.hist(a, bins=80); plt.title(name)
+                    plt.tight_layout(); plt.savefig(vd/("hist_"+name+".png")); plt.close()
+
             for k,v in mdict.items():
                 metr_sum[k] += float(v)
             total += float(silog_loss(pred_log, depth, mask).float().item())
@@ -224,10 +282,12 @@ def main():
             torch.save({"model": model.state_dict(), "args": vars(args)}, args.ckpt)
             print(f"[ckpt] saved -> {args.ckpt}")
 
-        # step scheduler en fin d'époque
+        # step scheduler once per epoch (after validation and potential ckpt)
         if sched is not None:
             sched.step()
     
+    # debug CSVs are under runs/debug
+    print(f"[debug] Wrote batch losses under: runs/debug")
     print("[done]")
 
 
