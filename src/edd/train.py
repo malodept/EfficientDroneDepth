@@ -13,6 +13,7 @@ from .data import make_loaders
 from .modeling import DPTSmall, silog_loss, l1_masked, depth_metrics, _align
 import imageio
 from torch.amp import autocast
+import numpy as np  # ensure np is available in validate debug
 
 def parse_args():
     ap = argparse.ArgumentParser()
@@ -204,15 +205,21 @@ def validate(model, loader, device):
             if n == 0:
                 vd = Path("runs/debug/val")
                 vd.mkdir(parents=True, exist_ok=True)
+                # stats de biais d’échelle: y ≈ s*x
                 x = depth[:,0][mask[:,0] > 0.5].detach().float().cpu().numpy()
                 y = pred_lin[:,0][mask[:,0] > 0.5].detach().float().cpu().numpy()
                 x_, y_ = x[::50], y[::50]
-                if x_.size > 10:
+                if x_.size > 10 and y_.size > 10:
                     plt.figure(figsize=(4,4)); plt.scatter(x_, y_, s=4)
-                    lim = (0, max(1e-6, np.percentile(np.r_[x_,y_], 99)))
+                    try:
+                        lim_max = max(1e-6, float(np.percentile(np.r_[x_, y_], 99)))
+                    except Exception:
+                        lim_max = float(max(1e-6, x_.max() if x_.size else 1.0, y_.max() if y_.size else 1.0))
+                    lim = (0, lim_max)
                     plt.xlim(lim); plt.ylim(lim); plt.plot(lim, lim)
                     plt.xlabel("GT depth"); plt.ylabel("Pred depth")
                     plt.tight_layout(); plt.savefig(vd/"scatter_val_gt_vs_pred.png"); plt.close()
+                # histos
                 for arr, name in [(pred_log, "pred_log"), (pred_lin, "pred_lin"), (depth, "depth_lin")]:
                     a = arr.detach().float().cpu().numpy().ravel()[::50]
                     plt.figure(figsize=(4,3)); plt.hist(a, bins=80); plt.title(name)
