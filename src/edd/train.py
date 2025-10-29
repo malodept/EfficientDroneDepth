@@ -71,31 +71,32 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None, val_loader
 
         # forward + losses en AMP
         with autocast(device_type="cuda", dtype=torch.float16):
-            pred = model(img)
-            pred = torch.clamp(pred, -4.0, 4.0)
-            # calcule une seule loss scalaire
+            pred_log = model(img)                           # log(depth) côté réseau
+            pred_log = torch.clamp(pred_log, -4.0, 4.0)
+            pred_lin = torch.exp(pred_log)                  # repasse en linéaire pour les termes linéaires
+            # pertes cohérentes d'échelle
             loss = (
-                0.6*silog_loss(pred, depth, mask)
-                + 0.2*l1_masked(pred, depth, mask)
-                + 0.2*grad_loss_log(pred, depth, mask)
+                0.6*silog_loss(pred_log, depth, mask)       # silog attend log vs lin → interne gère log(depth)
+                + 0.2*l1_masked(pred_lin, depth, mask)      # L1 en linéaire
+                + 0.2*grad_loss_log(pred_log, depth, mask)  # gradient en log
             ).float()
 
         # --- debug first batch only, SANS GRAD ---
         if i == 0:
             with torch.no_grad():
                 os.makedirs("runs/figures", exist_ok=True)
-                ps = pred[:1,0].detach()
+                ps = pred_log[:1,0].detach()
                 print("[dbg] logD mean:", float(ps.mean()),
                       "target mean:", float(depth[:1].mean().detach()),
                       "mask%:", float(mask.mean().detach()))
                 print("[dbg] pred min/median/max:",
-                      float(pred.min().detach()), float(pred.median().detach()), float(pred.max().detach()))
+                      float(pred_log.min().detach()), float(pred_log.median().detach()), float(pred_log.max().detach()))
                 try:
                     x = img[0].detach().cpu().numpy().transpose(1,2,0)
                     x = (x * np.array([0.229,0.224,0.225]) + np.array([0.485,0.456,0.406]))
                     x = np.clip(x*255, 0, 255).astype(np.uint8)
                     y = depth[0,0].detach().cpu().numpy()
-                    p = pred[0,0].detach().cpu().numpy()
+                    p = pred_log[0,0].detach().cpu().numpy()
                     p_lin = np.exp(np.clip(p, -10, 10))
                     y_viz = (np.clip(y/ max(1e-6, np.percentile(y,99)),0,1)*255).astype(np.uint8)
                     p_viz = (np.clip(p_lin/ max(1e-6, np.percentile(p_lin,99)),0,1)*255).astype(np.uint8)
@@ -121,7 +122,7 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None, val_loader
 
         total += float(loss.detach().item())
         # libère le graphe au plus tôt
-        del loss, pred
+        del loss, pred_log, pred_lin
 
     # validation: log du %valide
     if val_loader is not None:
@@ -145,24 +146,19 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None, val_loader
 
 # --- validate ---------------------------------------------------------------
 def validate(model, loader, device):
-    model.eval(); total = 0.0
-    m = {"AbsRel":0.0,"RMSE":0.0,"Delta<1.25":0.0}; n=0
+    model.eval()
+    total = 0.0
+    metr  = []
     with torch.no_grad(), autocast(device_type="cuda", dtype=torch.float16):
         for batch in loader:
             img   = batch["image"].to(device, non_blocking=True)
             depth = batch["depth"].to(device, non_blocking=True)
             mask  = batch["mask"].to(device, non_blocking=True)
-
-            pred = model(img)                  # logits
-            pred = torch.clamp(pred, -8.0, 8.0)
-
-            loss = 0.6*silog_loss(pred, depth, mask) \
-                 + 0.2*l1_masked(pred, depth, mask) \
-                 + 0.2*grad_loss_log(pred, depth, mask)
-
-            metrics = depth_metrics(pred, depth, mask)  # doit accepter logits
-            for k in m: m[k] += float(metrics[k])
-            total += float(loss.detach().item()); n += 1
+            pred_log = torch.clamp(model(img), -4.0, 4.0)
+            pred_lin = torch.exp(pred_log)
+            m        = depth_metrics(pred_lin, depth, mask)  # métriques en linéaire
+            metr.append(m)
+            total += float(silog_loss(pred_log, depth, mask).float().item())
 
     for k in m: m[k] /= max(1, n)
     return total / max(1, n), m
