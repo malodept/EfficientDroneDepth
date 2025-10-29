@@ -73,96 +73,55 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None, val_loader
         with autocast(device_type="cuda", dtype=torch.float16):
             pred = model(img)
             pred = torch.clamp(pred, -4.0, 4.0)
-            loss = 0.6*silog_loss(pred, depth, mask) \
-                + 0.2*l1_masked(pred, depth, mask) \
+            # calcule une seule loss scalaire
+            loss = (
+                0.6*silog_loss(pred, depth, mask)
+                + 0.2*l1_masked(pred, depth, mask)
                 + 0.2*grad_loss_log(pred, depth, mask)
+            ).float()
 
-        # backward + step (AMP-safe, CPU-safe)
+        # --- debug first batch only, SANS GRAD ---
+        if i == 0:
+            with torch.no_grad():
+                os.makedirs("runs/figures", exist_ok=True)
+                ps = pred[:1,0].detach()
+                print("[dbg] logD mean:", float(ps.mean()),
+                      "target mean:", float(depth[:1].mean().detach()),
+                      "mask%:", float(mask.mean().detach()))
+                print("[dbg] pred min/median/max:",
+                      float(pred.min().detach()), float(pred.median().detach()), float(pred.max().detach()))
+                try:
+                    x = img[0].detach().cpu().numpy().transpose(1,2,0)
+                    x = (x * np.array([0.229,0.224,0.225]) + np.array([0.485,0.456,0.406]))
+                    x = np.clip(x*255, 0, 255).astype(np.uint8)
+                    y = depth[0,0].detach().cpu().numpy()
+                    p = pred[0,0].detach().cpu().numpy()
+                    p_lin = np.exp(np.clip(p, -10, 10))
+                    y_viz = (np.clip(y/ max(1e-6, np.percentile(y,99)),0,1)*255).astype(np.uint8)
+                    p_viz = (np.clip(p_lin/ max(1e-6, np.percentile(p_lin,99)),0,1)*255).astype(np.uint8)
+                    imageio.imwrite("runs/figures/rgb.png",  x)
+                    imageio.imwrite("runs/figures/gt.png",   y_viz)
+                    imageio.imwrite("runs/figures/pred.png", p_viz)
+                except Exception as e:
+                    print("[dbg] viz error:", e)
+
+        optimizer.zero_grad(set_to_none=True)
+        # backward unique + clipping 0.1
         if scaler is not None:
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
-        else:
-            loss.backward()
-        gn = torch.nn.utils.clip_grad_norm_(model.parameters(), 0.1)
-        if scaler is not None:
+            gn = torch.nn.utils.clip_grad_norm_(model.parameters(), 0.1)
             scaler.step(optimizer)
             scaler.update()
         else:
+            loss.backward()
+            gn = torch.nn.utils.clip_grad_norm_(model.parameters(), 0.1)
             optimizer.step()
-        # scheduler stepped per-epoch in main()
-
-        # --- dump mask & debug first batch only ---
-        if i == 0:
-            os.makedirs("runs/figures", exist_ok=True)
-            mk = (mask[0,0].detach().cpu().numpy()*255).astype(np.uint8)
-            imageio.imwrite("runs/figures/mask.png", mk)
-
-            ps = pred[:1].detach()  # évite l’avertissement requires_grad
-            print("[dbg] logD mean:", float(ps.mean()),
-                  "target mean:", float(depth[:1].mean().detach()),
-                  "mask%:", float(mask.mean().detach()))
-            print("[dbg] pred min/median/max:",
-                  float(pred.min().detach()), float(pred.median().detach()), float(pred.max().detach()))
-
-            try:
-                x = img[0].detach().cpu().numpy().transpose(1,2,0)
-                x = (x * np.array([0.229,0.224,0.225]) + np.array([0.485,0.456,0.406]))
-                x = np.clip(x*255, 0, 255).astype(np.uint8)
-                y = depth[0,0].detach().cpu().numpy()
-                p = pred[0,0].detach().cpu().numpy()
-                p_lin = np.exp(np.clip(p, -10, 10))
-                y_viz = (np.clip(y/ max(1e-6, np.percentile(y,99)),0,1)*255).astype(np.uint8)
-                p_viz = (np.clip(p_lin/ max(1e-6, np.percentile(p_lin,99)),0,1)*255).astype(np.uint8)
-                imageio.imwrite("runs/figures/rgb.png",  x)
-                imageio.imwrite("runs/figures/gt.png",   y_viz)
-                imageio.imwrite("runs/figures/pred.png", p_viz)
-                print("[dump] runs/figures/{rgb,gt,pred}.png")
-            except Exception as e:
-                print("[dump skipped]", repr(e))
-
-            for n, p0 in model.named_parameters():
-                if p0.requires_grad and p0.dim() >= 2:
-                    ref_name, ref_w = n, p0.detach().clone()
-                    print("[ref]", n, tuple(p0.shape))
-                    break
-        # ------------------------------------------
-
-        # garde validité masque
-        valid_pix = mask.sum()
-        if valid_pix < 1:
-            print("[skip] no valid pixels")
-            continue
-        #print(f"[train] valid%≈{mask.mean().item():.3f}")
-
-        if not torch.isfinite(loss):
-            print("[skip] non-finite loss")
-            continue
-
-        optimizer.zero_grad(set_to_none=True)
-        # backward en AMP + clipping 0.1
-        scaler.scale(loss).backward()
-        scaler.unscale_(optimizer)
-        gn = torch.nn.utils.clip_grad_norm_(model.parameters(), 0.1)
-        if not torch.isfinite(gn):
-            print("[skip] non-finite grad")
-            optimizer.zero_grad(set_to_none=True)
-            continue
-
-        if i == 0:
-            print(f"[grad] ||g||={float(gn):.3e}", end="")
-
-        scaler.step(optimizer)
-        scaler.update()
-        if scheduler is not None:
-            scheduler.step()
-
-        if i == 0 and ref_name is not None:
-            w = dict(model.named_parameters())[ref_name].detach()
-            dn = (w - ref_w).abs().mean().item()
-            print(f"  [Δw] {ref_name} mean|Δw|={dn:.3e}")
-            ref_w = w.clone()
+        # scheduler: step par ÉPOQUE (pas ici)
 
         total += float(loss.detach().item())
+        # libère le graphe au plus tôt
+        del loss, pred
 
     # validation: log du %valide
     if val_loader is not None:
@@ -227,10 +186,10 @@ def main():
     # optimizer + scheduler
     optim = AdamW(model.parameters(), lr=1e-4, weight_decay=5e-3)
 
-    # GradScaler (PyTorch 2.8): use torch.amp.GradScaler
-    scaler = (torch.amp.GradScaler("cuda") if device == "cuda" else None)
+    # GradScaler (PyTorch >=2.2)
+    scaler = torch.amp.GradScaler("cuda") if device == "cuda" else None
     
-    # CosineAnnealingLR stepped once per epoch (see end of epoch loop)
+    # scheduler per-epoch
     sched = CosineAnnealingLR(optim, T_max=args.epochs, eta_min=1e-5)
 
     # helpers: freeze/unfreeze backbone au démarrage
@@ -264,7 +223,7 @@ def main():
             torch.save({"model": model.state_dict(), "args": vars(args)}, args.ckpt)
             print(f"[ckpt] saved -> {args.ckpt}")
 
-        # step scheduler once per epoch (after validation and potential ckpt)
+        # step scheduler en fin d'époque
         if sched is not None:
             sched.step()
     
