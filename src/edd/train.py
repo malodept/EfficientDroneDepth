@@ -83,7 +83,7 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None, val_loader
 
         # forward + pertes en AMP
         with autocast(device_type="cuda", dtype=torch.float16):
-            pred_log = model(img)                    # log(depth)
+            pred_log = model(img) + beta             # log(depth) + bias
             pred_log = torch.clamp(pred_log, -4.0, 4.0)
             pred_lin = torch.exp(pred_log)           # pour les termes en linéaire
             # décompose les pertes pour logging
@@ -199,14 +199,22 @@ def validate(model, loader, device):
             img   = batch["image"].to(device, non_blocking=True)
             depth = batch["depth"].to(device, non_blocking=True)
             mask  = batch["mask"].to(device, non_blocking=True)
-            pred_log = torch.clamp(model(img), -4.0, 4.0)
+            pred_log = torch.clamp(model(img) + beta, -4.0, 4.0)
             pred_lin = torch.exp(pred_log)
-            mdict    = depth_metrics(pred_lin, depth, mask)  # métriques en linéaire
-            # ignore empty/None metrics
-            if not mdict:
-                total += float(silog_loss(pred_log, depth, mask).float().item())
-                continue
-            # dump une seule fois sur la première itération val
+            # --- metrics unscaled
+            mdict    = depth_metrics(pred_lin, depth, mask)
+            # --- metrics median-scaled (robuste)
+            msel = mask[:,0] > 0.5
+            if msel.any():
+                gt_med  = depth[:,0][msel].median()
+                pr_med  = pred_lin[:,0][msel].median()
+                s = (gt_med / torch.clamp(pr_med, min=1e-6)).item()
+                pred_scaled = torch.clamp(pred_lin * s, max=1e6)
+                mdict_scaled = depth_metrics(pred_scaled, depth, mask)
+                # préfixe clés
+                mdict = {**{k: v for k,v in mdict.items()},
+                         **{f"{k}@scaled": v for k,v in mdict_scaled.items()}}
+            # dump visuels une fois
             if n == 0:
                 vd = Path("runs/debug/val")
                 vd.mkdir(parents=True, exist_ok=True)
@@ -255,13 +263,12 @@ def main():
     )
 
     model = DPTSmall(backbone_name=args.backbone, pretrained=True).to(device)
-
-    if False:
-        overfit_one_batch(model, train_loader, device, steps=200, lr=1e-2)
-        return
-
+    # learnable global log-depth bias
+    global beta
+    beta = torch.nn.Parameter(torch.zeros(1, device=device))
+    
     # optimizer + scheduler
-    optim = AdamW(model.parameters(), lr=1e-4, weight_decay=5e-3)
+    optim = AdamW(list(model.parameters()) + [beta], lr=args.lr, weight_decay=1e-2)
 
     # GradScaler (PyTorch >=2.2)
     scaler = torch.amp.GradScaler("cuda") if device == "cuda" else None
