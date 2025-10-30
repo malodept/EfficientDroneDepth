@@ -55,21 +55,45 @@ def _read_depth(path, size):
 
 class TartanAirDepth(Dataset):
     """
-    Minimal TartanAir dataset loader expecting paired RGB/depth with matching ids.
+    TartanAir loader. Accepte:
+      A) remap:   PXXXX/left/*_left.png <-> PXXXX/depth/*_depth.png
+      B) natif:   PXXXX/image_lcam_front/*.png <-> PXXXX/depth_lcam_front/*.png
     """
-    def __init__(self, root: str, img_size: int = 384, limit_samples: Optional[int] = None, split_ratio: float = 0.9, train: bool = True):
+    def __init__(self, root: str, img_size: int = 384, limit_samples: Optional[int] = None,
+                 split_ratio: float = 0.9, train: bool = True, camera: str = "lcam_front"):
         self.img_size = img_size
         self.train = train
-        left_paths = glob.glob(os.path.join(root, "**", "left", "*_left.*"), recursive=True)
+        self.camera = camera
+
         pairs = []
-        for lp in left_paths:
-            base = os.path.basename(lp).replace("_left", "")
-            stem = os.path.splitext(base)[0]
-            depth_candidate = os.path.join(os.path.dirname(os.path.dirname(lp)), "depth", f"{stem}_depth.png")
-            if os.path.exists(depth_candidate):
-                pairs.append((lp, depth_candidate))
+        # Try remapped layout first
+        left_paths = glob.glob(os.path.join(root, "P*", "left", "*_left.*"))
+        if left_paths:
+            for lp in left_paths:
+                base = os.path.basename(lp).replace("_left", "")
+                stem = os.path.splitext(base)[0]
+                depth_candidate = os.path.join(os.path.dirname(os.path.dirname(lp)), "depth", f"{stem}_depth.png")
+                if os.path.exists(depth_candidate):
+                    pairs.append((lp, depth_candidate))
+
+        # If nothing, fall back to native TartanAir layout
         if not pairs:
-            raise RuntimeError(f"No pairs found under {root}.")
+            img_glob = os.path.join(root, "P*", f"image_{self.camera}", "*.png")
+            dep_dir_name = f"depth_{self.camera}"
+            for ip in glob.glob(img_glob):
+                seq_dir = os.path.dirname(os.path.dirname(ip))          # .../PXXXX
+                dep_dir = os.path.join(seq_dir, dep_dir_name)
+                if not os.path.isdir(dep_dir):
+                    continue
+                # image name: *_<camera>.png -> key sans suffix caméra
+                stem = os.path.splitext(os.path.basename(ip))[0].replace(f"_{self.camera}", "")
+                dp = os.path.join(dep_dir, f"{stem}_{self.camera}_depth.png")
+                if os.path.exists(dp):
+                    pairs.append((ip, dp))
+
+        if not pairs:
+            raise RuntimeError(f"No pairs found under {root} (tried remap and native layouts for camera={self.camera}).")
+
         random.seed(42); random.shuffle(pairs)
         if limit_samples is not None:
             pairs = pairs[:limit_samples]
@@ -103,7 +127,7 @@ class TartanAirDepth(Dataset):
 
 def make_loaders(root: str, img_size: int = 384, batch_size: int = 8, num_workers: int = 2, limit_samples: Optional[int] = None):
     train_ds = TartanAirDepth(root, img_size=img_size, limit_samples=limit_samples, train=True)
-    val_ds = TartanAirDepth(root, img_size=img_size, limit_samples=limit_samples, train=False)
+    val_ds   = TartanAirDepth(root, img_size=img_size, limit_samples=limit_samples, train=False)
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
     return train_loader, val_loader
