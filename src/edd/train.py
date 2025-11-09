@@ -22,12 +22,14 @@ def parse_args():
     ap.add_argument("--img_size", type=int, default=384)
     ap.add_argument("--batch_size", type=int, default=8)
     ap.add_argument("--epochs", type=int, default=10)
-    ap.add_argument("--lr", type=float, default=1e-3)
+    ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--weight_decay", type=float, default=1e-4)
     ap.add_argument("--limit_samples", type=int, default=None)
     ap.add_argument("--backbone", type=str, default="resnet34")
     ap.add_argument("--ckpt", type=str, default="runs/edd_midas.pt")
     ap.add_argument("--num_workers", type=int, default=0)
+    ap.add_argument("--limit_samples", type=int, default=None)
+    ap.add_argument("--max_steps_per_epoch", type=int, default=None)
     return ap.parse_args()
 
 def overfit_one_batch(model, loader, device, steps=200, lr=1e-2):
@@ -63,7 +65,7 @@ def grad_loss_log(pred, target, mask, eps=1e-6):
 
 
 # --- train_one_epoch ---------------------------------------------------------
-def train_one_epoch(model, loader, optimizer, device, scheduler=None, val_loader=None, scaler=None):
+def train_one_epoch(model, loader, optimizer, device, scheduler=None, val_loader=None, scaler=None, max_steps=None):
     import os, torch, numpy as np, imageio.v2 as imageio
     model.train()
     total = 0.0
@@ -162,11 +164,14 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None, val_loader
             w.writerow([i, f"{lr0:.3e}", float(loss.detach().item()),
                         float(sil.detach().item()), float(l1.detach().item()), float(grd.detach().item()),
                         gn_val])
-        # scheduler: step par ÉPOQUE (pas ici)
 
         total += float(loss.detach().item())
-        # libère le graphe au plus tôt
+        # on libère le graphe au plus tôt
         del loss, pred_log, pred_lin, sil, l1, grd
+
+        # on borne le nombre de batches pour une "époque courte"
+        if max_steps and (i + 1) >= max_steps:
+            break
 
     # validation: log du %valide
     if val_loader is not None:
@@ -259,7 +264,11 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"; print(f"[device] {device}")
 
     train_loader, val_loader = make_loaders(
-        args.data_root, img_size=args.img_size, batch_size=args.batch_size, limit_samples=args.limit_samples
+        args.data_root,
+        img_size=args.img_size,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        limit_samples=args.limit_samples,
     )
 
     model = DPTSmall(backbone_name=args.backbone, pretrained=True).to(device)
@@ -294,14 +303,17 @@ def main():
 
         t0 = time.time()
         tr = train_one_epoch(model, train_loader, optim, device,
-                             scheduler=sched, val_loader=val_loader, scaler=scaler)
+                             scheduler=sched, val_loader=val_loader, scaler=scaler,
+                             max_steps=args.max_steps_per_epoch)
         va, met = validate(model, val_loader, device)
 
         lrs = [f"{g['lr']:.2e}" for g in optim.param_groups]
+        def pick(key):
+            return met.get(f"{key}@scaled", met.get(key, float("nan")))
         print(f"[epoch {epoch+1}] lrs={lrs} train={tr:.4f} val={va:.4f} "
-              f"AbsRel={met['AbsRel']:.4f} RMSE={met['RMSE']:.4f} d1.25={met['Delta<1.25']:.4f} "
+              f"AbsRel={pick('AbsRel'):.4f} RMSE={pick('RMSE'):.4f} d1.25={pick('Delta<1.25'):.4f} "
               f"time={time.time()-t0:.1f}s")
-
+        
         if va < best:
             best = va
             torch.save({"model": model.state_dict(), "args": vars(args)}, args.ckpt)
