@@ -29,21 +29,18 @@ def _read_depth(path, size):
     if d_raw is None: raise FileNotFoundError(path)
     if d_raw.ndim == 3: d_raw = d_raw[...,0]
 
-    # mask = pixels réellement valides du PNG brut
-    m = (d_raw > 0) & np.isfinite(d_raw)
+    # masks non nuls
+    m = (d_raw > 0)
 
     # resize identique à l'image
     d = _resize_pad(d_raw, size, cv2.INTER_NEAREST).astype(np.float32)
     m = _resize_pad(m.astype(np.uint8), size, cv2.INTER_NEAREST).astype(bool)
 
-    # échelle cm/mm -> m
-    mx = float(d.max())
-    if mx > 5000:   d /= 1000.0
-    elif mx <= 255: d /= 100.0
+    # TartanAir PNG = millimètres → mètres (déterministe)
+    d /= 1000.0
 
-    # invalide → 0, ne relève PAS les petits depths
+    # clamp raisonnable, garde 0 pour invalides
     d = np.where(m, d, 0.0).astype(np.float32)
-    # borne haute seulement
     d = np.clip(d, 0.0, 80.0)
 
     m = m.astype(np.float32)
