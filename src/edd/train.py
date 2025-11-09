@@ -251,7 +251,12 @@ def validate(model, loader, device):
                     a = np.clip((a-lo)/(hi-lo+1e-6), 0, 1)
                     return (a*255).astype(np.uint8)
                 from imageio.v2 import imwrite
-                imwrite(vd/"rgb.png", (img[0].permute(1,2,0).detach().cpu().numpy()*255).astype(np.uint8))
+                # unnormalize ImageNet
+                x = img[0].detach().cpu()
+                mean = torch.tensor([0.485,0.456,0.406]).view(3,1,1)
+                std  = torch.tensor([0.229,0.224,0.225]).view(3,1,1)
+                x = (x*std + mean).clamp(0,1)
+                imwrite(vd/"rgb.png", (x.permute(1,2,0).numpy()*255).astype(np.uint8))
                 imwrite(vd/"gt.png",  imshow01(depth))
                 imwrite(vd/"pred.png",imshow01(pred_lin))
 
