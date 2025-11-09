@@ -14,7 +14,7 @@ from .data import make_loaders
 from .modeling import DPTSmall, silog_loss, l1_masked, depth_metrics, _align
 import imageio
 from torch.amp import autocast
-import numpy as np  # ensure np is available in validate debug
+import numpy as np  
 
 def parse_args():
     ap = argparse.ArgumentParser()
@@ -229,13 +229,15 @@ def validate(model, loader, device):
 
             # --- sanity check: relative MAE simple @scaled ---
             with torch.no_grad():
-                msel = mask[:,0] > 0.5
-                gt_m = depth[msel]
-                pr_m = pred_lin[msel]
-                # median scale batch-wide pour debug
+                msel = mask[:,0] > 0.5                     # [B,H,W]
+                gt_m = depth[:,0][msel]                    # [N]
+                pr_m = pred_lin[:,0][msel]                 # [N]
                 sdbg = gt_m.median() / torch.clamp(pr_m.median(), min=1e-6)
-                mae_rel = torch.mean(torch.abs((pred_lin* sdbg - depth)[msel]) / torch.clamp(depth[msel], min=1e-6))
+                mae_rel = torch.mean(
+                    torch.abs((pred_lin[:,0]*sdbg - depth[:,0])[msel]) / torch.clamp(depth[:,0][msel], min=1e-6)
+                )
                 mdict["AbsRel@debug"] = float(mae_rel)
+
             # dump visuels une fois
             if n == 0:
                 vd = Path("runs/debug/val")
