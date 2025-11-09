@@ -84,14 +84,31 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None, val_loader
 
         # forward + pertes en AMP
         with autocast(device_type="cuda", dtype=torch.float16):
-            pred_log = model(img) + beta             # log(depth) + bias
-            pred_log = torch.clamp(pred_log, -4.0, 4.0)
-            pred_lin = torch.exp(pred_log)           # pour les termes en linéaire
-            # décompose les pertes pour logging
-            sil = silog_loss(pred_log, depth, mask)
-            l1  = l1_masked(pred_lin,  depth, mask)
-            grd = grad_loss_log(pred_log, depth, mask)
-            loss = (0.6*sil + 0.3*l1 + 0.1*grd).float()
+            pred_log = torch.clamp(model(img) + beta, -4.0, 4.0)
+            pred_lin = torch.exp(pred_log)                               # (B,1,H,W)
+            eps = 1e-6
+            # --- scale per-image via médiane (comme en eval @scaled) ---
+            B = pred_lin.shape[0]
+            scales = []
+            for b in range(B):
+                msel = (mask[b,0] > 0.5)
+                if torch.any(msel):
+                    gt_med = depth[b,0][msel].median()
+                    pr_med = pred_lin[b,0][msel].median()
+                    s = gt_med / torch.clamp(pr_med, min=eps)
+                else:
+                    s = torch.tensor(1.0, device=pred_lin.device)
+            scales.append(s)
+            scale = torch.stack(scales).view(B,1,1,1)
+            pred_lin_s  = torch.clamp(pred_lin * scale, min=eps)         # scaled for losses
+            pred_log_s  = torch.log(pred_lin_s)
+            # pertes sur la version “scaled”
+            sil = silog_loss(pred_log_s, depth, mask)
+            l1  = l1_lin_loss(pred_lin_s, depth, mask)
+            grd = grad_loss(pred_lin_s, depth, mask)
+            # petit ancrage d’échelle absolue pour éviter les dérives (moyenne batch)
+            anchor = torch.mean(torch.abs(torch.log(scale)))
+            loss = (0.55*sil + 0.30*l1 + 0.10*grd + 0.05*anchor).float()
 
         # --- debug first batch only, SANS GRAD ---
         if i == 0:
