@@ -141,16 +141,16 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None, val_loader
                 plt.tight_layout(); plt.savefig(dbg_dir/"scatter_gt_vs_pred_b0.png"); plt.close()
 
         optimizer.zero_grad(set_to_none=True)
-        # backward unique + clipping 0.1
+        # backward + clip
         if scaler is not None:
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
-            gn = torch.nn.utils.clip_grad_norm_(model.parameters(), 0.1)
+            gn = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)  # 0.1 si tu veux rester strict
             scaler.step(optimizer)
             scaler.update()
         else:
             loss.backward()
-            gn = torch.nn.utils.clip_grad_norm_(model.parameters(), 0.1)
+            gn = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
         # log CSV (append)
         with open(csv_path, "a", newline="") as f:
@@ -337,9 +337,10 @@ def main():
         lrs = [f"{g['lr']:.2e}" for g in optim.param_groups]
         def pick(key):
             return met.get(f"{key}@scaled", met.get(key, float("nan")))
+        dbg = met.get("AbsRel@debug", float("nan"))
         print(f"[epoch {epoch+1}] lrs={lrs} train={tr:.4f} val={va:.4f} "
-              f"AbsRel={pick('AbsRel'):.4f} RMSE={pick('RMSE'):.4f} d1.25={pick('Delta<1.25'):.4f} "
-              f"time={time.time()-t0:.1f}s")
+            f"AbsRel={pick('AbsRel'):.4f} RMSE={pick('RMSE'):.4f} d1.25={pick('Delta<1.25'):.4f} "
+            f"AbsRel@debug={dbg:.4f} time={time.time()-t0:.1f}s")
         
         if va < best:
             best = va
