@@ -91,7 +91,7 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None, val_loader
             sil = silog_loss(pred_log, depth, mask)
             l1  = l1_masked(pred_lin,  depth, mask)
             grd = grad_loss_log(pred_log, depth, mask)
-            loss = (0.6*sil + 0.2*l1 + 0.2*grd).float()
+            loss = (0.6*sil + 0.3*l1 + 0.1*grd).float()
 
         # --- debug first batch only, SANS GRAD ---
         if i == 0:
