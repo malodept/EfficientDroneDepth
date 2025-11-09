@@ -84,10 +84,11 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None, val_loader
 
         # forward + pertes en AMP
         with autocast(device_type="cuda", dtype=torch.float16):
-            pred_log = torch.clamp(model(img) + beta, -4.0, 4.0)
-            pred_lin = torch.exp(pred_log)                               # (B,1,H,W)
+            pred_log = torch.clamp(model(img) + beta, -4.0, 4.0)   # log(depth)
+            pred_lin = torch.exp(pred_log)
+
+            # --- median scaling per-image (on entraîne sur la version @scaled)
             eps = 1e-6
-            # --- scale per-image via médiane (comme en eval @scaled) ---
             B = pred_lin.shape[0]
             scales = []
             for b in range(B):
@@ -98,17 +99,21 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None, val_loader
                     s = gt_med / torch.clamp(pr_med, min=eps)
                 else:
                     s = torch.tensor(1.0, device=pred_lin.device)
-            scales.append(s)
+                scales.append(s)
             scale = torch.stack(scales).view(B,1,1,1)
-            pred_lin_s  = torch.clamp(pred_lin * scale, min=eps)         # scaled for losses
-            pred_log_s  = torch.log(pred_lin_s)
-            # pertes sur la version “scaled”
+            pred_lin_s = torch.clamp(pred_lin * scale, min=eps)
+            pred_log_s = torch.log(pred_lin_s)
+
+            # pertes avec TES noms de fonctions
             sil = silog_loss(pred_log_s, depth, mask)
-            l1  = l1_lin_loss(pred_lin_s, depth, mask)
-            grd = grad_loss(pred_lin_s, depth, mask)
-            # petit ancrage d’échelle absolue pour éviter les dérives (moyenne batch)
-            anchor = torch.mean(torch.abs(torch.log(scale)))
+            l1  = l1_masked(pred_lin_s, depth, mask)
+            grd = grad_loss_log(pred_log_s, depth, mask)   # gradient en log-profondeur
+
+            # petit ancrage d’échelle pour éviter les dérives
+            anchor = torch.mean(torch.abs(torch.log(scale + eps)))
+
             loss = (0.55*sil + 0.30*l1 + 0.10*grd + 0.05*anchor).float()
+
 
         # --- debug first batch only, SANS GRAD ---
         if i == 0:
