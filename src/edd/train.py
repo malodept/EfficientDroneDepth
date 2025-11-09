@@ -28,7 +28,6 @@ def parse_args():
     ap.add_argument("--backbone", type=str, default="resnet34")
     ap.add_argument("--ckpt", type=str, default="runs/edd_midas.pt")
     ap.add_argument("--num_workers", type=int, default=0)
-    ap.add_argument("--limit_samples", type=int, default=None)
     ap.add_argument("--max_steps_per_epoch", type=int, default=None)
     return ap.parse_args()
 
