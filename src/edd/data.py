@@ -125,9 +125,10 @@ class TartanAirDepth(Dataset):
         }
 
 
-def make_loaders(root: str, img_size: int = 384, batch_size: int = 8, num_workers: int = 2, limit_samples: Optional[int] = None):
+def make_loaders(root: str, img_size: int = 384, batch_size: int = 8, num_workers: int = 4, limit_samples: Optional[int] = None):
     train_ds = TartanAirDepth(root, img_size=img_size, limit_samples=limit_samples, train=True)
     val_ds   = TartanAirDepth(root, img_size=img_size, limit_samples=limit_samples, train=False)
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
+    kw = dict(num_workers=num_workers, pin_memory=True, persistent_workers=True, prefetch_factor=4)
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, **kw)
+    val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False, **kw)
     return train_loader, val_loader
