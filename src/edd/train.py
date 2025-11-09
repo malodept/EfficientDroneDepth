@@ -205,19 +205,27 @@ def validate(model, loader, device):
             mask  = batch["mask"].to(device, non_blocking=True)
             pred_log = torch.clamp(model(img) + beta, -4.0, 4.0)
             pred_lin = torch.exp(pred_log)
-            # --- metrics unscaled
-            mdict    = depth_metrics(pred_lin, depth, mask)
-            # --- metrics median-scaled (robuste)
-            msel = mask[:,0] > 0.5
-            if msel.any():
-                gt_med  = depth[:,0][msel].median()
-                pr_med  = pred_lin[:,0][msel].median()
-                s = (gt_med / torch.clamp(pr_med, min=1e-6)).item()
-                pred_scaled = torch.clamp(pred_lin * s, max=1e6)
-                mdict_scaled = depth_metrics(pred_scaled, depth, mask)
-                # préfixe clés
-                mdict = {**{k: v for k,v in mdict.items()},
-                         **{f"{k}@scaled": v for k,v in mdict_scaled.items()}}
+
+            mdict = depth_metrics(pred_lin, depth, mask)  # unscaled
+            # --- median scaling per-image ---
+            B = pred_lin.shape[0]
+            scaled_accum = {}
+            for b in range(B):
+                msel = mask[b,0] > 0.5
+                if not torch.any(msel):
+                    continue
+                gt_med = depth[b,0][msel].median()
+                pr_med = pred_lin[b,0][msel].median()
+                s = (gt_med / torch.clamp(pr_med, min=1e-6))
+                ps = torch.clamp(pred_lin[b:b+1] * s, max=1e6)
+                md_b = depth_metrics(ps, depth[b:b+1], mask[b:b+1])
+                for k,v in md_b.items():
+                    scaled_accum[k] = scaled_accum.get(k, 0.0) + float(v)
+            if scaled_accum:
+                for k in scaled_accum:
+                    scaled_accum[k] /= max(1, B)
+                for k,v in scaled_accum.items():
+                    mdict[f"{k}@scaled"] = v
             # dump visuels une fois
             if n == 0:
                 vd = Path("runs/debug/val")
