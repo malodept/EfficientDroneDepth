@@ -236,11 +236,16 @@ def validate(model, loader, device):
                     plt.xlim(lim); plt.ylim(lim); plt.plot(lim, lim)
                     plt.xlabel("GT depth"); plt.ylabel("Pred depth")
                     plt.tight_layout(); plt.savefig(vd/"scatter_val_gt_vs_pred.png"); plt.close()
-                # histos
-                for arr, name in [(pred_log, "pred_log"), (pred_lin, "pred_lin"), (depth, "depth_lin")]:
-                    a = arr.detach().float().cpu().numpy().ravel()[::50]
-                    plt.figure(figsize=(4,3)); plt.hist(a, bins=80); plt.title(name)
-                    plt.tight_layout(); plt.savefig(vd/("hist_"+name+".png")); plt.close()
+                # images normalisées pour vue rapide
+                def imshow01(t):
+                    a = t.detach().float().cpu().numpy()[0,0]
+                    hi = np.percentile(a, 95); lo = np.percentile(a, 5)
+                    a = np.clip((a-lo)/(hi-lo+1e-6), 0, 1)
+                    return (a*255).astype(np.uint8)
+                from imageio.v2 import imwrite
+                imwrite(vd/"rgb.png", (img[0].permute(1,2,0).detach().cpu().numpy()*255).astype(np.uint8))
+                imwrite(vd/"gt.png",  imshow01(depth))
+                imwrite(vd/"pred.png",imshow01(pred_lin))
 
             # accumulate only finite values
             for k, v in mdict.items():
