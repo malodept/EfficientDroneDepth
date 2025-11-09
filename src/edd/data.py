@@ -36,7 +36,20 @@ def _read_depth(path, size):
     d = _resize_pad(d_raw, size, cv2.INTER_NEAREST).astype(np.float32)
     m = _resize_pad(m.astype(np.uint8), size, cv2.INTER_NEAREST).astype(bool)
 
-
+    # --- auto-détection d'unité sur les pixels valides ---
+    if np.any(m):
+        med = float(np.median(d[m]))          # médiane des valeurs > 0
+        # Heuristique TartanAir:
+        # - si médiane >> 200 => vraisemblablement millimètres
+        # - si 20 < médiane <= 200 => vraisemblablement centimètres
+        # - sinon on considère mètres
+        if med > 200.0:
+            d = d / 1000.0                    # mm -> m
+        elif med > 20.0:
+            d = d / 100.0                     # cm -> m
+        # sinon: déjà en mètres
+    else:
+        d = d  # aucune conversion si entièrement vide
 
     d = np.where(m, d, 0.0).astype(np.float32)
     d = np.clip(d, 0.0, 80.0)
