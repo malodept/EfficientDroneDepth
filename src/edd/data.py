@@ -36,10 +36,8 @@ def _read_depth(path, size):
     d = _resize_pad(d_raw, size, cv2.INTER_NEAREST).astype(np.float32)
     m = _resize_pad(m.astype(np.uint8), size, cv2.INTER_NEAREST).astype(bool)
 
-    # TartanAir PNG = millimètres → mètres (déterministe)
-    d /= 1000.0
 
-    # clamp raisonnable, garde 0 pour invalides
+
     d = np.where(m, d, 0.0).astype(np.float32)
     d = np.clip(d, 0.0, 80.0)
 
