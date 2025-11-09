@@ -83,20 +83,27 @@ def l1_masked(pred, target, mask, eps=1e-6):
 
 
 @torch.no_grad()
-def depth_metrics(pred_log, target, mask, eps=1e-6):
-    # pred_log: logits log(depth)
-    pred = torch.exp(torch.clamp(pred_log, -8.0, 8.0))
-    tgt  = torch.clamp(target, min=eps)
-    m    = (mask > 0).float()
+def depth_metrics(pred_lin, target, mask, eps=1e-6):
+    """
+    pred_lin, target: profondeurs en mètres (B,1,H,W)
+    mask: (B,1,H,W) binaire {0,1}
+    """
+    m = (mask > 0.5)
+    if not torch.any(m):
+        return {"AbsRel": float("nan"), "RMSE": float("nan"), "Delta<1.25": 0.0}
 
-    n = m.sum().clamp_min(1.0)
-    abs_rel = (m * (pred - tgt).abs() / tgt).sum() / n
-    rmse    = torch.sqrt((m * (pred - tgt)**2).sum() / n)
+    p = pred_lin[m]
+    g = target[m]
+    g = torch.clamp(g, min=eps)
+    p = torch.clamp(p, min=eps)
 
-    # delta<1.25
-    ratio = torch.max(pred / tgt, tgt / pred)
-    d125  = (m * (ratio < 1.25).float()).sum() / n
-    return {"AbsRel": abs_rel.item(), "RMSE": rmse.item(), "Delta<1.25": d125.item()}
+    abs_rel = torch.mean(torch.abs(p - g) / g)
+    rmse    = torch.sqrt(torch.mean((p - g) ** 2))
+    ratio   = torch.max(p / g, g / p)
+    d125    = torch.mean((ratio < 1.25).float())
+
+    return {"AbsRel": float(abs_rel), "RMSE": float(rmse), "Delta<1.25": float(d125)}
+
 
 
 

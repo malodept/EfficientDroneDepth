@@ -226,6 +226,16 @@ def validate(model, loader, device):
                     scaled_accum[k] /= max(1, B)
                 for k,v in scaled_accum.items():
                     mdict[f"{k}@scaled"] = v
+
+            # --- sanity check: relative MAE simple @scaled ---
+            with torch.no_grad():
+                msel = mask[:,0] > 0.5
+                gt_m = depth[msel]
+                pr_m = pred_lin[msel]
+                # median scale batch-wide pour debug
+                sdbg = gt_m.median() / torch.clamp(pr_m.median(), min=1e-6)
+                mae_rel = torch.mean(torch.abs((pred_lin* sdbg - depth)[msel]) / torch.clamp(depth[msel], min=1e-6))
+                mdict["AbsRel@debug"] = float(mae_rel)
             # dump visuels une fois
             if n == 0:
                 vd = Path("runs/debug/val")
