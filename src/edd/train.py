@@ -38,7 +38,7 @@ def overfit_one_batch(model, loader, device, steps=200, lr=1e-2):
     opt = torch.optim.AdamW(model.parameters(), lr=lr)
     for t in range(steps):
         pred = model(img)
-        loss = silog_loss(pred, depth, mask)  # simple et stable
+        loss = silog_loss(pred, depth, mask)  
         opt.zero_grad(); loss.backward(); opt.step()
         if (t+1)%20==0:
             print(f"[overfit] step {t+1} loss={loss.item():.4f}")
@@ -49,12 +49,9 @@ def _grad_xy(x):
 def grad_loss_log(pred, target, mask, eps=1e-6):
     # aligne et filtre
     p, t, m = _align(pred, target, mask, eps)
-    # évite log(0)
     t = torch.clamp(t, min=1e-3)
-    # érode le masque pour ne garder que des paires valides
     mx = m[...,1:,:] * m[...,:-1,:]
     my = m[...,:,1:] * m[...,:,:-1]
-    # gradients
     gx_p, gy_p = _grad_xy(p)
     gx_t, gy_t = _grad_xy(torch.log(t))
     # L1 pondérée par le masque
@@ -63,15 +60,19 @@ def grad_loss_log(pred, target, mask, eps=1e-6):
     return num / den
 
 
+
+
+
+# On entraîne le modèle en demi-précision (float16) avec AMP et GradScaler :
+# Ca accélère les calculs sur GPU et évite les erreurs numériques.
+
 # --- train_one_epoch ---------------------------------------------------------
 def train_one_epoch(model, loader, optimizer, device, scheduler=None, val_loader=None, scaler=None, max_steps=None):
-    import os, torch, numpy as np, imageio.v2 as imageio
+    import imageio.v2 as imageio
     model.train()
     total = 0.0
-    # dossier debug (par epoch)
     dbg_dir = Path("runs/debug") / f"epoch_{int(time.time())}"
     dbg_dir.mkdir(parents=True, exist_ok=True)
-    # logger CSV des pertes (header)
     csv_path = dbg_dir / "batch_losses.csv"
     with open(csv_path, "w", newline="") as f:
         w = csv.writer(f)
@@ -84,10 +85,19 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None, val_loader
 
         # forward + pertes en AMP
         with autocast(device_type="cuda", dtype=torch.float16):
-            pred_log = torch.clamp(model(img) + beta, -4.0, 4.0)  # log(depth)
+            pred_log = torch.clamp(model(img) + beta, -4.0, 4.0)  
             pred_lin = torch.exp(pred_log)
+# Le modèle prédit log(depth) plutôt que depth directement.
+# Cela stabilise l'apprentissage car la profondeur varie sur plusieurs ordres de grandeur.
+# On ajoute un paramètre 'beta' (biais global) et on limite la plage avec clamp()
+# pour éviter que les valeurs explosent ou deviennent négatives.
 
-            # --- median scaling per-image ---
+# On ajuste chaque image par un rescaling médian comme dans MiDaS :
+#   - on calcule la médiane des valeurs GT (vraies profondeurs) et des valeurs prédites
+#   - on multiplie la prédiction par le rapport med(GT)/med(pred)
+#   - la perte devient indépendante de l’échelle absolue (c’est une évaluation relative).
+
+            # median scaling per-image 
             eps = 1e-6
             B = pred_lin.shape[0]
             scales = []
@@ -108,11 +118,17 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None, val_loader
             l1  = l1_masked(pred_lin_s, depth, mask)
             grd = grad_loss_log(pred_log_s, depth, mask)
 
-            loss = (0.6*sil + 0.3*l1 + 0.1*grd).float()  # pas d’ancre d’échelle ici
+            loss = (0.6*sil + 0.3*l1 + 0.1*grd).float()  
+
+# La perte totale combine plusieurs termes :
+#   60 % SiLog (stabilité sur log-profondeur)
+#   30 % L1 (écart linéaire direct)
+#   10 % Gradient loss (cohérence des bords et reliefs)
 
 
 
-        # --- debug first batch only, SANS GRAD ---
+
+        # --- debug first batch only ---
         if i == 0:
             with torch.no_grad():
                 os.makedirs("runs/figures", exist_ok=True)
@@ -136,7 +152,7 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None, val_loader
                     imageio.imwrite("runs/figures/pred.png", p_viz)
                 except Exception as e:
                     print("[dbg] viz error:", e)
-            # Histogrammes rapides & scatter pour le batch 0
+            
             with torch.no_grad():
                 def _save_hist(arr, title, fn):
                     arr = arr.flatten().detach().float().cpu().numpy()
@@ -159,19 +175,23 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None, val_loader
                 plt.xlim(lim); plt.ylim(lim); plt.plot(lim, lim)
                 plt.tight_layout(); plt.savefig(dbg_dir/"scatter_gt_vs_pred_b0.png"); plt.close()
 
+
+
         optimizer.zero_grad(set_to_none=True)
         # backward + clip
         if scaler is not None:
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
-            gn = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)  # 0.1 si tu veux rester strict
+            gn = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)  
+# On limite la norme globale des gradients à 1.0 avant la mise à jour
+# Cela empêche les explosions de gradient et rend l’entraînement plus régulier.
             scaler.step(optimizer)
             scaler.update()
         else:
             loss.backward()
             gn = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
-        # log CSV (append)
+        
         with open(csv_path, "a", newline="") as f:
             w = csv.writer(f)
             lr0 = optimizer.param_groups[0]["lr"]
@@ -184,10 +204,10 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None, val_loader
                         gn_val])
 
         total += float(loss.detach().item())
-        # on libère le graphe au plus tôt
+        
         del loss, pred_log, pred_lin, sil, l1, grd
 
-        # on borne le nombre de batches pour une "époque courte"
+        
         if max_steps and (i + 1) >= max_steps:
             break
 
@@ -281,7 +301,6 @@ def validate(model, loader, device):
                     hi = np.percentile(a, 95); lo = np.percentile(a, 5)
                     a = np.clip((a-lo)/(hi-lo+1e-6), 0, 1)
                     return (a*255).astype(np.uint8)
-                from imageio.v2 import imwrite
                 # unnormalize ImageNet
                 x = img[0].detach().cpu()
                 mean = torch.tensor([0.485,0.456,0.406]).view(3,1,1)
@@ -308,9 +327,15 @@ def validate(model, loader, device):
 
 # --- main -------------------------------------------------------------------
 def main():
+
+    # Sélection du device (GPU si dispo)
     args = parse_args(); os.makedirs("runs", exist_ok=True)
     device = "cuda" if torch.cuda.is_available() else "cpu"; print(f"[device] {device}")
 
+
+    # DataLoaders entraînement / validation
+    # - img_size: resize cohérent avec le modèle
+    # - limit_samples: époques courtes pour itérer vite (debug)
     train_loader, val_loader = make_loaders(
         args.data_root,
         img_size=args.img_size,
@@ -319,15 +344,27 @@ def main():
         limit_samples=args.limit_samples,
     )
 
+
+# Backbone : Resnet34 encodeur visuel généraliste qui transforme l’image RGB 
+# En features maps riches sémantiquement: bords, textures, structures. 
+# Par exemple 3x256x256 -> 256x16x16
+# Sert de base à la tête de profondeur. On le gèle au début pour stabiliser puis on le dégèle pour
+# fine-tune sur notre tâche.
+
     model = DPTSmall(backbone_name=args.backbone, pretrained=True).to(device)
-    # learnable global log-depth bias
+
+# DPTSmall : architecture MiDaS légère (type Vision Transformer) avec tête de profondeur
+# on charge des poids pré-entraînés pour profiter de features déjà utiles,
+# puis on adapte la tête (et éventuellement le backbone) à notre dataset.
+
+    # Biais global "log-depth" apprenable (corrige l’échelle moyenne)    
     global beta
     beta = torch.nn.Parameter(torch.zeros(1, device=device))
     
     # optimizer + scheduler
     optim = AdamW(list(model.parameters()) + [beta], lr=args.lr, weight_decay=1e-2)
 
-    # GradScaler (PyTorch >=2.2)
+    # GradScaler 
     scaler = torch.amp.GradScaler("cuda") if device == "cuda" else None
     
     # scheduler per-epoch
